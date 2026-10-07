@@ -1,0 +1,764 @@
+//+------------------------------------------------------------------+
+//|                                            Combined_PnL_Rect.mq5 |
+//|  DailyPnL v12 + Rectangle Zone Tool — No MA Panel                |
+//|  Header LEFT  (= EQ area)  → click to toggle Daily PnL panel     |
+//|  Header RIGHT (⬛)         → click to toggle Rectangle tool      |
+//+------------------------------------------------------------------+
+#property copyright "Combined v2.0"
+#property version   "2.00"
+#property indicator_chart_window
+#property indicator_plots 0
+
+//==================================================================
+// ── DAILY PNL INPUTS ──────────────────────────────────────────────
+//==================================================================
+enum ENUM_DEFAULT_POS
+{
+   POS_LOWER_RIGHT = 1,
+   POS_LOWER_LEFT  = 2,
+   POS_UPPER_RIGHT = 3,
+   POS_UPPER_LEFT  = 4
+};
+input bool   InpShowPanel                 = true; // Show Panel on this chart
+input ENUM_DEFAULT_POS InpDefaultPos      = POS_LOWER_RIGHT; // Default Snap Position
+input int    InpHeaderEqFontSize          = 15; // Header Equity Font Size
+input int    InpHeaderNetFontSize         = 11; // Header Net PnL Font Size
+input int    InpResetHour_UTC             = 21;
+input int    InpResetMin_UTC              = 0;
+input double InpStartingBalance           = 10000.0;
+input double InpOverallTarget             = 800.0;
+input double InpMaxDD                     = 1400.0;
+input double InpDailyDD                   = 389.44;
+input string InpCurrency                  = "$";
+input color  InpBgColor                   = clrWhite;
+input color  InpBorderColor               = C'160,175,215';
+input color  InpHdrBg                     = clrBlack; 
+input color  InpHdrText                   = clrWhite;
+input color  InpEqPosColor                = C'0,180,255'; // Equity Profit Color
+input color  InpEqNegColor                = clrRed;       // Equity Loss Color
+input color  InpProfitColor               = C'0,150,60';
+input color  InpLossColor                 = clrRed;
+input color  InpNetPosColor               = C'0,220,100'; // Daily PnL Profit Color
+input color  InpNetNegColor               = clrRed;       // Daily PnL Loss Color
+input color  InpTextColor                 = C'30,30,70';
+input color  InpSepColor                  = C'195,205,230';
+
+//==================================================================
+// ── LAYOUT CONSTANTS ──────────────────────────────────────────────
+//==================================================================
+#define PW          195
+#define HDR_H        30
+#define CONTENT_H   103
+#define BAR_X         6
+#define BAR_W       183
+#define BAR_H        12
+
+//==================================================================
+// ── GLOBALS ───────────────────────────────────────────────────────
+//==================================================================
+string   g_pfx            = "DPL_";
+bool     g_col            = true;
+int      g_ox             = 0;
+int      g_oy             = 0;
+bool     g_drag           = false;
+int      g_dDX            = 0, g_dDY = 0;
+double   g_dayStartBal    = 0;
+datetime g_lastDay        = 0;
+bool     g_rebuild        = true;
+bool     g_autoPositioned = false;
+bool     g_mouseOnHdr     = false;
+int      g_clickX         = 0, g_clickY = 0;
+
+// Rectangle tool
+bool     isDrawing      = false;
+int      clickStep      = 0;
+string   currentObjName = "";
+uint     lastClickTime  = 0;
+int      startX=0, startY=0;
+double   startPrice=0;
+datetime startTime=0;
+
+// Tracking state for screen resize safety
+ENUM_DEFAULT_POS g_currentSnap = POS_LOWER_RIGHT;
+string GV_X   = _Symbol+"_CMB_X";
+string GV_Y   = _Symbol+"_CMB_Y";
+string GV_SET = _Symbol+"_CMB_SET";
+bool   g_wasManuallyDragged=false;
+
+// Color memory
+string GV_COLOR           = _Symbol+"_ZoneColor";
+color  g_currentZoneColor = clrGold;
+
+// Object names for header buttons
+string HDR_RECT_BTN   = "CMB_RectBtn";
+string HDR_TOGGLE_BTN = "CMB_ToggleBtn"; 
+
+// Button colors
+color CLR_BTN_ACTIVE= clrCrimson;
+
+//==================================================================
+// ── DYNAMIC EXPANSION ─────────────────────────────────────────────
+//==================================================================
+bool ExpandUp()
+{
+   long ch = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+   if (ch > 0 && g_oy < ch / 2) return false;
+   return true;
+}
+
+//==================================================================
+// ── GEOMETRY ──────────────────────────────────────────────────────
+//==================================================================
+int HdrY()            { return g_oy; }
+int ContentY(int r=0) { return (ExpandUp() ? g_oy-CONTENT_H : g_oy+HDR_H)+r; }
+int PnlTopY()         { return (ExpandUp() && !g_col) ? g_oy-CONTENT_H : g_oy; }
+int PnlBotY()         { return (!ExpandUp() && !g_col) ? g_oy+HDR_H+CONTENT_H : g_oy+HDR_H; }
+
+//==================================================================
+// ── OBJECT HELPERS ────────────────────────────────────────────────
+//==================================================================
+void R(string n,int ax,int ay,int w,int h,color bg,color brd,int bw)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,      CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,   ax);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,   ay);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,       w);
+   ObjectSetInteger(0,n,OBJPROP_YSIZE,       h);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,     bg);
+   ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,brd);
+   ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,       bw);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,  false);
+   ObjectSetInteger(0,n,OBJPROP_BACK,        false);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,      0);
+}
+void L(string n,int ax,int ay,string txt,color clr,int fs,
+       ENUM_ANCHOR_POINT anch=ANCHOR_LEFT_UPPER)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE, ax);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE, ay);
+   ObjectSetString (0,n,OBJPROP_TEXT,      txt);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,     clr);
+   ObjectSetString (0,n,OBJPROP_FONT,      "Consolas");
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,  fs);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,    anch);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,n,OBJPROP_BACK,      false);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,    1);
+}
+void B(string n,int ax,int ay,int w,int h,string txt,color bg,color fg,int fs)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE, ax);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE, ay);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,     w);
+   ObjectSetInteger(0,n,OBJPROP_YSIZE,     h);
+   ObjectSetString (0,n,OBJPROP_TEXT,      txt);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,   bg);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,     fg);
+   ObjectSetString (0,n,OBJPROP_FONT,      "Consolas");
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,  fs);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,true);
+   ObjectSetInteger(0,n,OBJPROP_STATE,     false);
+   ObjectSetInteger(0,n,OBJPROP_BACK,      false);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,    2);
+}
+
+//==================================================================
+// ── REPOSITION ────────────────────────────────────────────────────
+//==================================================================
+void Reposition()
+{
+   if(!InpShowPanel) return;
+
+   int hY=HdrY(), cY=ContentY();
+   int topY=PnlTopY(), botY=PnlBotY();
+
+   ObjectSetInteger(0,g_pfx+"BG",  OBJPROP_XDISTANCE, g_ox);
+   ObjectSetInteger(0,g_pfx+"BG",  OBJPROP_YDISTANCE, topY);
+   ObjectSetInteger(0,g_pfx+"BG",  OBJPROP_XSIZE,     PW);
+   ObjectSetInteger(0,g_pfx+"BG",  OBJPROP_YSIZE,     botY-topY);
+   ObjectSetInteger(0,g_pfx+"HD",  OBJPROP_XDISTANCE, g_ox);
+   ObjectSetInteger(0,g_pfx+"HD",  OBJPROP_YDISTANCE, hY);
+   
+   // Outside Toggle Triangle
+   int tglX = g_ox - 14; 
+   ObjectSetInteger(0,HDR_TOGGLE_BTN,OBJPROP_XDISTANCE, tglX);
+   ObjectSetInteger(0,HDR_TOGGLE_BTN,OBJPROP_YDISTANCE, hY+6);
+
+   // Equity and Net PnL alignment
+   ObjectSetInteger(0,g_pfx+"EQ",  OBJPROP_XDISTANCE, g_ox+8);
+   ObjectSetInteger(0,g_pfx+"EQ",  OBJPROP_YDISTANCE, hY+4); 
+   ObjectSetInteger(0,g_pfx+"H_NV",OBJPROP_XDISTANCE, g_ox+115); 
+   ObjectSetInteger(0,g_pfx+"H_NV",OBJPROP_YDISTANCE, hY+7);
+   
+   // Rectangle tool button
+   ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_XDISTANCE, g_ox+PW-18);
+   ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_YDISTANCE, hY+7);
+
+   if(!g_col)
+   {
+      ObjectSetInteger(0,g_pfx+"PL", OBJPROP_XDISTANCE, g_ox+8);
+      ObjectSetInteger(0,g_pfx+"PL", OBJPROP_YDISTANCE, cY+4);
+      ObjectSetInteger(0,g_pfx+"PV", OBJPROP_XDISTANCE, g_ox+PW-6);
+      ObjectSetInteger(0,g_pfx+"PV", OBJPROP_YDISTANCE, cY+2);
+      ObjectSetInteger(0,g_pfx+"S1", OBJPROP_XDISTANCE, g_ox);
+      ObjectSetInteger(0,g_pfx+"S1", OBJPROP_YDISTANCE, cY+17);
+      ObjectSetInteger(0,g_pfx+"LL", OBJPROP_XDISTANCE, g_ox+8);
+      ObjectSetInteger(0,g_pfx+"LL", OBJPROP_YDISTANCE, cY+22);
+      ObjectSetInteger(0,g_pfx+"LV", OBJPROP_XDISTANCE, g_ox+PW-6);
+      ObjectSetInteger(0,g_pfx+"LV", OBJPROP_YDISTANCE, cY+20);
+      ObjectSetInteger(0,g_pfx+"S2", OBJPROP_XDISTANCE, g_ox);
+      ObjectSetInteger(0,g_pfx+"S2", OBJPROP_YDISTANCE, cY+35);
+      ObjectSetInteger(0,g_pfx+"NB", OBJPROP_XDISTANCE, g_ox);
+      ObjectSetInteger(0,g_pfx+"NB", OBJPROP_YDISTANCE, cY+36);
+      ObjectSetInteger(0,g_pfx+"NL", OBJPROP_XDISTANCE, g_ox+8);
+      ObjectSetInteger(0,g_pfx+"NL", OBJPROP_YDISTANCE, cY+42);
+      ObjectSetInteger(0,g_pfx+"NV", OBJPROP_XDISTANCE, g_ox+PW-6);
+      ObjectSetInteger(0,g_pfx+"NV", OBJPROP_YDISTANCE, cY+38);
+      ObjectSetInteger(0,g_pfx+"S3", OBJPROP_XDISTANCE, g_ox);
+      ObjectSetInteger(0,g_pfx+"S3", OBJPROP_YDISTANCE, cY+56);
+      int bsY=cY+57, barY=bsY+14;
+      ObjectSetInteger(0,g_pfx+"BS",  OBJPROP_XDISTANCE, g_ox);
+      ObjectSetInteger(0,g_pfx+"BS",  OBJPROP_YDISTANCE, bsY);
+      ObjectSetInteger(0,g_pfx+"BHL", OBJPROP_XDISTANCE, g_ox+BAR_X);
+      ObjectSetInteger(0,g_pfx+"BHL", OBJPROP_YDISTANCE, bsY+2);
+      ObjectSetInteger(0,g_pfx+"BHR", OBJPROP_XDISTANCE, g_ox+PW-BAR_X);
+      ObjectSetInteger(0,g_pfx+"BHR", OBJPROP_YDISTANCE, bsY+2);
+      ObjectSetInteger(0,g_pfx+"OVL", OBJPROP_XDISTANCE, g_ox+PW/2);
+      ObjectSetInteger(0,g_pfx+"OVL", OBJPROP_YDISTANCE, bsY+2);
+      ObjectSetInteger(0,g_pfx+"BLB", OBJPROP_XDISTANCE, g_ox+BAR_X);
+      ObjectSetInteger(0,g_pfx+"BLB", OBJPROP_YDISTANCE, barY);
+      ObjectSetInteger(0,g_pfx+"DDF", OBJPROP_YDISTANCE,  barY);
+      ObjectSetInteger(0,g_pfx+"TGF", OBJPROP_YDISTANCE,  barY);
+      ObjectSetInteger(0,g_pfx+"CDV", OBJPROP_YDISTANCE,  barY);
+      ObjectSetInteger(0,g_pfx+"OV",  OBJPROP_XDISTANCE, g_ox+PW/2);
+      ObjectSetInteger(0,g_pfx+"OV",  OBJPROP_YDISTANCE, barY+BAR_H+2);
+   }
+}
+
+//==================================================================
+// ── DAY / BALANCE LOGIC ───────────────────────────────────────────
+//==================================================================
+datetime DayStart()
+{
+   datetime now=TimeGMT(); MqlDateTime d; TimeToStruct(now,d);
+   d.hour=InpResetHour_UTC; d.min=InpResetMin_UTC; d.sec=1;
+   datetime r=StructToTime(d);
+   return now<r ? r-86400 : r;
+}
+void UpdateDayBal()
+{
+   datetime ds=DayStart();
+   if(ds==g_lastDay&&g_dayStartBal>0) return;
+   double bal=AccountInfoDouble(ACCOUNT_BALANCE),net=0;
+   HistorySelect(ds,TimeCurrent());
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      ulong tk=HistoryDealGetTicket(i); if(!tk) continue;
+      ENUM_DEAL_TYPE  dt=(ENUM_DEAL_TYPE) HistoryDealGetInteger(tk,DEAL_TYPE);
+      ENUM_DEAL_ENTRY de=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY);
+      if(dt!=DEAL_TYPE_BUY&&dt!=DEAL_TYPE_SELL) continue;
+      if(de!=DEAL_ENTRY_OUT&&de!=DEAL_ENTRY_INOUT) continue;
+      net+=HistoryDealGetDouble(tk,DEAL_PROFIT)
+          +HistoryDealGetDouble(tk,DEAL_SWAP)
+          +HistoryDealGetDouble(tk,DEAL_COMMISSION);
+   }
+   g_dayStartBal=bal-net; g_lastDay=ds;
+}
+
+//==================================================================
+// ── AUTO POSITION ─────────────────────────────────────────────────
+//==================================================================
+void ApplyAutoPos()
+{
+   if(!InpShowPanel) return;
+
+   int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+   if(cw<=0||ch<=0) return;
+   int bm=2,tm=6,sm=6;
+   switch(g_currentSnap)
+   {
+      case POS_LOWER_RIGHT: g_ox=cw-PW-sm; g_oy=ch-HDR_H-bm; break;
+      case POS_LOWER_LEFT:  g_ox=sm;       g_oy=ch-HDR_H-bm; break;
+      case POS_UPPER_RIGHT: g_ox=cw-PW-sm; g_oy=tm;          break;
+      case POS_UPPER_LEFT:  g_ox=sm;       g_oy=tm;          break;
+   }
+   g_autoPositioned=true;
+   g_rebuild=true;
+}
+
+//==================================================================
+// ── BAR CALC ──────────────────────────────────────────────────────
+//==================================================================
+void CalcBar(int &lW,int &rW,int &ddFx,int &tgFx)
+{
+   double ddu=MathMax(0,InpStartingBalance-AccountInfoDouble(ACCOUNT_EQUITY));
+   double ovn=AccountInfoDouble(ACCOUNT_BALANCE)-InpStartingBalance;
+   double tot=InpMaxDD+InpOverallTarget;
+   lW  =(int)MathRound(BAR_W*InpMaxDD/tot);
+   rW  =BAR_W-lW;
+   ddFx=InpMaxDD>0             ?(int)MathMin(ddu/InpMaxDD*lW,             (double)lW):0;
+   tgFx=(InpOverallTarget>0&&ovn>0)?(int)MathMin(ovn/InpOverallTarget*rW,(double)rW):0;
+}
+
+//==================================================================
+// ── DRAW ──────────────────────────────────────────────────────────
+//==================================================================
+void Draw()
+{
+   if(!InpShowPanel) return;
+
+   datetime ds=DayStart();
+   double dp2=0,dl=0;
+   HistorySelect(ds,ds+86400);
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      ulong tk=HistoryDealGetTicket(i); if(!tk) continue;
+      ENUM_DEAL_TYPE  dt=(ENUM_DEAL_TYPE) HistoryDealGetInteger(tk,DEAL_TYPE);
+      ENUM_DEAL_ENTRY de=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY);
+      if(dt!=DEAL_TYPE_BUY&&dt!=DEAL_TYPE_SELL) continue;
+      if(de!=DEAL_ENTRY_OUT&&de!=DEAL_ENTRY_INOUT) continue;
+      double p=HistoryDealGetDouble(tk,DEAL_PROFIT)
+              +HistoryDealGetDouble(tk,DEAL_SWAP)
+              +HistoryDealGetDouble(tk,DEAL_COMMISSION);
+      if(p>0) dp2+=p; else dl+=p;
+   }
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong ptk=PositionGetTicket(i); if(!ptk) continue;
+      double p=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      if(p>0) dp2+=p; else dl+=p;
+   }
+   double dn  = dp2+dl;
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double ovn = bal-InpStartingBalance;
+   int lW,rW,ddFx,tgFx; CalcBar(lW,rW,ddFx,tgFx);
+   double ddu = MathMax(0,InpStartingBalance-eq);
+   double ddP = InpMaxDD>0 ? ddu/InpMaxDD*100.0 : 0;
+
+   color ddC = ddP>=80?clrRed:ddP>=50?clrOrange:(color)C'200,40,40';
+   color tgC = ovn>=InpOverallTarget?(color)C'0,200,0':ovn>0?(color)C'0,160,60':(color)C'160,200,160';
+   color ovC = ovn<0?ddC:ovn>0?tgC:InpTextColor;
+   
+   color eqC = (eq >= InpStartingBalance) ? InpEqPosColor : InpEqNegColor; 
+   color nvC = dn>=0?InpNetPosColor:InpNetNegColor;
+
+   string eqS = InpCurrency+DoubleToString(eq,2);
+   string pvS = (dp2>=0?"+":"")+InpCurrency+DoubleToString(dp2,2);
+   string lvS = "-"+InpCurrency+DoubleToString(MathAbs(dl),2);
+   string nvS = (dn>=0?"+":"")+InpCurrency+DoubleToString(dn,2);
+   string ovS = (ovn>=0?"+":"")+InpCurrency+DoubleToString(ovn,2);
+   string ddH = "MaxDD "+InpCurrency+DoubleToString(InpMaxDD,0);
+   string tgH = "Target "+InpCurrency+DoubleToString(InpOverallTarget,0);
+
+   //── FULL REBUILD ─────────────────────────────────────────────
+   if(g_rebuild)
+   {
+      ObjectsDeleteAll(0,g_pfx);
+      ObjectDelete(0,HDR_RECT_BTN);
+      ObjectDelete(0,HDR_TOGGLE_BTN);
+      g_rebuild=false;
+
+      int hY=HdrY(), cY=ContentY();
+      int topY=PnlTopY(), botY=PnlBotY();
+
+      R(g_pfx+"BG", g_ox,topY, PW,botY-topY, InpBgColor,InpBorderColor,1);
+      R(g_pfx+"HD", g_ox,hY,   PW,HDR_H,     InpHdrBg,InpHdrBg,0);
+      
+      // Outside Toggle Triangle
+      int tglX = g_ox - 14; 
+      string tglTxt = ExpandUp() ? "▲" : "▼"; 
+      L(HDR_TOGGLE_BTN, tglX, hY+6, tglTxt, clrDarkGray, 12, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0,HDR_TOGGLE_BTN,OBJPROP_HIDDEN,false);
+      ObjectSetInteger(0,HDR_TOGGLE_BTN,OBJPROP_ZORDER,10); 
+
+      // Main Header Values
+      L(g_pfx+"EQ",   g_ox+8,   hY+4, eqS,    eqC, InpHeaderEqFontSize,  ANCHOR_LEFT_UPPER);
+      L(g_pfx+"H_NV", g_ox+115, hY+7, nvS,    nvC, InpHeaderNetFontSize, ANCHOR_LEFT_UPPER); 
+
+      // Rectangle tool button
+      B(HDR_RECT_BTN, g_ox+PW-18, hY+7, 16, 16, "▭", isDrawing ? CLR_BTN_ACTIVE : InpHdrBg, clrWhite, 10);
+      ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_HIDDEN,false);
+
+      if(!g_col)
+      {
+         L(g_pfx+"PL", g_ox+8,    cY+4,  "Profit",  InpTextColor,  9);
+         L(g_pfx+"PV", g_ox+PW-6, cY+2,  pvS, InpProfitColor,11, ANCHOR_RIGHT_UPPER);
+         R(g_pfx+"S1", g_ox,      cY+17, PW,1, InpSepColor,InpSepColor,0);
+         L(g_pfx+"LL", g_ox+8,    cY+22, "Loss",    InpTextColor,  9);
+         L(g_pfx+"LV", g_ox+PW-6, cY+20, lvS, InpLossColor,  11, ANCHOR_RIGHT_UPPER);
+         R(g_pfx+"S2", g_ox,      cY+35, PW,1, InpSepColor,InpSepColor,0);
+         R(g_pfx+"NB", g_ox,      cY+36, PW,20,(color)C'235,240,255',(color)C'235,240,255',0);
+         L(g_pfx+"NL", g_ox+8,    cY+42, "Net PnL", InpTextColor,  9);
+         L(g_pfx+"NV", g_ox+PW-6, cY+38, nvS, nvC, 13, ANCHOR_RIGHT_UPPER);
+         R(g_pfx+"S3", g_ox,      cY+56, PW,1, InpSepColor,InpSepColor,0);
+         int bsY=cY+57, barY=bsY+14;
+         R(g_pfx+"BS",  g_ox,bsY,PW,46,(color)C'244,247,255',(color)C'244,247,255',0);
+         L(g_pfx+"BHL", g_ox+BAR_X,    bsY+2, ddH,(color)C'170,40,40',7);
+         L(g_pfx+"BHR", g_ox+PW-BAR_X, bsY+2, tgH,(color)C'30,130,30',7,ANCHOR_RIGHT_UPPER);
+         L(g_pfx+"OVL", g_ox+PW/2,     bsY+2, "overall",(color)C'140,150,195',6,ANCHOR_UPPER);
+         R(g_pfx+"BLB", g_ox+BAR_X,              barY,lW,            BAR_H,(color)C'255,222,222',(color)C'200,155,155',1);
+         R(g_pfx+"BRB", g_ox+BAR_X+lW,           barY,rW,            BAR_H,(color)C'222,255,222',(color)C'155,200,155',1);
+         R(g_pfx+"DDF", g_ox+BAR_X+lW-MathMax(ddFx,1),barY,MathMax(ddFx,1),BAR_H,ddC,ddC,0);
+         R(g_pfx+"TGF", g_ox+BAR_X+lW,           barY,MathMax(tgFx,1),BAR_H,tgC,tgC,0);
+         R(g_pfx+"CDV", g_ox+BAR_X+lW-1,         barY,2,BAR_H,InpTextColor,InpTextColor,0);
+         L(g_pfx+"OV",  g_ox+PW/2,               barY+BAR_H+2,ovS,ovC,12,ANCHOR_UPPER);
+      }
+      return;
+   }
+
+   //── VALUE-ONLY UPDATE ────────────────────────────────────────
+   ObjectSetString (0,g_pfx+"EQ",OBJPROP_TEXT, eqS);
+   ObjectSetInteger(0,g_pfx+"EQ",OBJPROP_COLOR,eqC);
+   ObjectSetString (0,g_pfx+"H_NV",OBJPROP_TEXT, nvS);
+   ObjectSetInteger(0,g_pfx+"H_NV",OBJPROP_COLOR,nvC);
+
+   // Update Toggle Triangle text
+   string tglTxt = ExpandUp() ? "▲" : "▼";
+   ObjectSetString(0, HDR_TOGGLE_BTN, OBJPROP_TEXT, tglTxt);
+
+   if(g_col) return;
+
+   ObjectSetString (0,g_pfx+"PV",OBJPROP_TEXT, pvS);
+   ObjectSetString (0,g_pfx+"LV",OBJPROP_TEXT, lvS);
+   ObjectSetString (0,g_pfx+"NV",OBJPROP_TEXT, nvS);
+   ObjectSetInteger(0,g_pfx+"NV",OBJPROP_COLOR,nvC);
+
+   int cY=ContentY(), bsY=cY+57, barY=bsY+14;
+   ObjectSetInteger(0,g_pfx+"DDF",OBJPROP_XDISTANCE,g_ox+BAR_X+lW-MathMax(ddFx,1));
+   ObjectSetInteger(0,g_pfx+"DDF",OBJPROP_XSIZE,    MathMax(ddFx,1));
+   ObjectSetInteger(0,g_pfx+"DDF",OBJPROP_BGCOLOR,  ddC);
+   ObjectSetInteger(0,g_pfx+"TGF",OBJPROP_XDISTANCE,g_ox+BAR_X+lW);
+   ObjectSetInteger(0,g_pfx+"TGF",OBJPROP_XSIZE,    MathMax(tgFx,1));
+   ObjectSetInteger(0,g_pfx+"TGF",OBJPROP_BGCOLOR,  tgC);
+   ObjectSetString (0,g_pfx+"OV", OBJPROP_TEXT, ovS);
+   ObjectSetInteger(0,g_pfx+"OV", OBJPROP_COLOR,ovC);
+}
+
+//==================================================================
+// ── OnInit ────────────────────────────────────────────────────────
+//==================================================================
+int OnInit()
+{
+   ChartSetInteger(0,CHART_EVENT_OBJECT_CREATE,true);
+   ChartSetInteger(0,CHART_EVENT_OBJECT_DELETE,true);
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,   true);
+
+   if(!InpShowPanel)
+   {
+       ObjectsDeleteAll(0,g_pfx);
+       ObjectDelete(0,HDR_RECT_BTN);
+       ObjectDelete(0,HDR_TOGGLE_BTN);
+       ChartRedraw(0);
+       return INIT_SUCCEEDED;
+   }
+
+   g_currentSnap = InpDefaultPos;
+   int savedSetting=-1;
+   if(GlobalVariableCheck(GV_SET)) savedSetting=(int)GlobalVariableGet(GV_SET);
+   
+   if(savedSetting > 0 && savedSetting <= 4) g_currentSnap = (ENUM_DEFAULT_POS)savedSetting;
+
+   if(GlobalVariableCheck(GV_X) && GlobalVariableCheck(GV_Y))
+   {
+      g_ox=(int)GlobalVariableGet(GV_X);
+      g_oy=(int)GlobalVariableGet(GV_Y);
+      g_autoPositioned=true;
+      g_wasManuallyDragged=true;
+   }
+   else
+   {
+      g_autoPositioned=false;
+      g_wasManuallyDragged=false;
+   }
+   GlobalVariableSet(GV_SET,(int)g_currentSnap);
+
+   if(GlobalVariableCheck(GV_COLOR))
+      g_currentZoneColor=(color)GlobalVariableGet(GV_COLOR);
+
+   g_col=true; g_rebuild=true;
+   UpdateDayBal(); Draw(); EventSetTimer(1);
+   ChartRedraw(0);
+   return INIT_SUCCEEDED;
+}
+
+//==================================================================
+// ── OnDeinit ──────────────────────────────────────────────────────
+//==================================================================
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,false);
+
+   if(g_wasManuallyDragged && InpShowPanel)
+   {
+      GlobalVariableSet(GV_X,g_ox);
+      GlobalVariableSet(GV_Y,g_oy);
+   }
+   else if (InpShowPanel)
+   {
+      if(GlobalVariableCheck(GV_X)) GlobalVariableDel(GV_X);
+      if(GlobalVariableCheck(GV_Y)) GlobalVariableDel(GV_Y);
+   }
+
+   if(InpShowPanel)
+   {
+      ObjectsDeleteAll(0,g_pfx);
+      ObjectDelete(0,HDR_RECT_BTN);
+      ObjectDelete(0,HDR_TOGGLE_BTN);
+   }
+   ChartRedraw(0);
+}
+
+//==================================================================
+// ── OnCalculate ───────────────────────────────────────────────────
+//==================================================================
+int OnCalculate(const int rates_total,const int prev_calculated,
+                const datetime &time[],const double &open[],
+                const double &high[],const double &low[],const double &close[],
+                const long &tick_volume[],const long &volume[],const int &spread[])
+{
+   if(InpShowPanel) ChartRedraw(0);
+   return rates_total;
+}
+
+//==================================================================
+// ── OnTimer ───────────────────────────────────────────────────────
+//==================================================================
+void OnTimer()
+{
+   if(!InpShowPanel) return;
+
+   if(!g_autoPositioned)
+   {
+      ApplyAutoPos();
+      if(g_autoPositioned){ g_rebuild=true; Draw(); ChartRedraw(0); return; }
+   }
+   UpdateDayBal(); Draw(); ChartRedraw(0);
+}
+
+//==================================================================
+// ── OnChartEvent ─────────────────────────────────────────────────
+//==================================================================
+void OnChartEvent(const int id,const long &lp,const double &dp,const string &sp)
+{
+   int x=(int)lp, y=(int)dp;
+
+   // Color memory — save when user edits a zone
+   if(id==CHARTEVENT_OBJECT_CHANGE)
+   {
+      if(StringFind(sp,"ZoneRect_")==0)
+      {
+         g_currentZoneColor=(color)ObjectGetInteger(0,sp,OBJPROP_COLOR);
+         GlobalVariableSet(GV_COLOR,(double)g_currentZoneColor);
+      }
+   }
+
+   if(!InpShowPanel) return; // Ignore interface clicks/drags if hidden
+
+   // ESC — cancel drawing
+   if(id==CHARTEVENT_KEYDOWN && lp==27)
+   {
+      if(isDrawing)
+      {
+         if(clickStep==1) ObjectDelete(0,currentObjName);
+         isDrawing=false; clickStep=0;
+         if(ObjectFind(0,HDR_RECT_BTN)>=0)
+         {
+            ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_BGCOLOR,InpHdrBg);
+            ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_COLOR,  clrWhite);
+         }
+         ChartRedraw(0);
+      }
+      return;
+   }
+
+   // H key — toggle PnL rows
+   if(id==CHARTEVENT_KEYDOWN && lp==72)
+   {
+      g_col=!g_col; g_rebuild=true;
+      Draw(); ChartRedraw(0); return;
+   }
+
+   // Object click
+   if(id==CHARTEVENT_OBJECT_CLICK)
+   {
+      // Toggle Instant Snap (Upper vs Lower Right) using the floating triangle
+      if(sp==HDR_TOGGLE_BTN)
+      {
+         long ch = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+         
+         if(g_oy > ch/2) g_currentSnap = POS_UPPER_RIGHT;
+         else            g_currentSnap = POS_LOWER_RIGHT;
+         
+         g_wasManuallyDragged = false;
+         ApplyAutoPos();
+         
+         GlobalVariableSet(GV_SET, (int)g_currentSnap);
+         if(GlobalVariableCheck(GV_X)) GlobalVariableDel(GV_X);
+         if(GlobalVariableCheck(GV_Y)) GlobalVariableDel(GV_Y);
+         
+         g_rebuild = true; Draw(); ChartRedraw(0); return;
+      }
+      
+      // Toggle Rect Tool
+      if(sp==HDR_RECT_BTN)
+      {
+         isDrawing=!isDrawing; clickStep=0;
+         ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_STATE, false);
+         ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_BGCOLOR,isDrawing?CLR_BTN_ACTIVE:InpHdrBg);
+         ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_COLOR,  clrWhite);
+         ChartRedraw(0); return;
+      }
+   }
+
+   // Mouse move — drag + live preview
+   if(id==CHARTEVENT_MOUSE_MOVE)
+   {
+      bool held=(StringFind(sp,"1")>=0);
+      int mx=x, my=y;
+
+      if(!held)
+      {
+         if(g_drag)
+         {
+            g_drag=false;
+            g_wasManuallyDragged=true;
+            GlobalVariableSet(GV_X,g_ox);
+            GlobalVariableSet(GV_Y,g_oy);
+            g_rebuild=true; Draw(); ChartRedraw(0);
+         }
+         else if(g_mouseOnHdr)
+         {
+            int dx=MathAbs(mx-g_clickX), dy=MathAbs(my-g_clickY);
+            // Don't collapse if clicking near the Rect tool
+            bool onActionBtns=(g_clickX>=g_ox+PW-30 && g_clickX<=g_ox+PW);
+            if(dx<6 && dy<6 && !onActionBtns)
+            {
+               g_col=!g_col; g_rebuild=true;
+               Draw(); ChartRedraw(0);
+            }
+         }
+         g_mouseOnHdr=false;
+         return;
+      }
+
+      bool onHdr=(mx>=g_ox && mx<=g_ox+PW && my>=HdrY() && my<=HdrY()+HDR_H);
+
+      if(!g_drag && !g_mouseOnHdr && onHdr)
+      {
+         g_mouseOnHdr=true; g_clickX=mx; g_clickY=my;
+         g_dDX=mx-g_ox; g_dDY=my-HdrY();
+      }
+      if(g_mouseOnHdr && !g_drag)
+         if(MathAbs(mx-g_clickX)>4 || MathAbs(my-g_clickY)>4) g_drag=true;
+
+      if(g_drag)
+      {
+         int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+         int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+         g_ox=MathMax(0,MathMin(mx-g_dDX,cw-PW));
+         int ny=my-g_dDY;
+         int topOffset=g_oy-PnlTopY();
+         int botOffset=PnlBotY()-g_oy;
+         ny=MathMax(topOffset,MathMin(ny,ch-botOffset));
+         g_oy=ny;
+         Reposition(); ChartRedraw(0);
+      }
+
+      // Live rect preview
+      if(isDrawing && clickStep==1)
+      {
+         datetime t; double p; int w;
+         if(ChartXYToTimePrice(0,x,y,w,t,p))
+         {
+            ObjectSetDouble (0,currentObjName,OBJPROP_PRICE,1,p);
+            datetime futureTime=TimeCurrent()+86400*365*10;
+            ObjectSetInteger(0,currentObjName,OBJPROP_TIME,1,futureTime);
+            ChartRedraw(0);
+         }
+      }
+      return;
+   }
+
+   // Chart change (Resizing handling)
+   if(id==CHARTEVENT_CHART_CHANGE)
+   {
+      int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+      int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+      
+      if(cw>0 && ch>0)
+      {
+         if(!g_wasManuallyDragged)
+         {
+            ApplyAutoPos();
+         }
+         else
+         {
+            // Boundary constraints keep the panel visible if the chart shrinks
+            if(g_ox + PW > cw) g_ox = (int)MathMax(0, cw - PW - 6);
+            if(g_oy + HDR_H > ch) g_oy = (int)MathMax(0, ch - HDR_H - 2);
+            if(g_ox < 0) g_ox = 6;
+            if(g_oy < 0) g_oy = 6;
+         }
+      }
+      
+      if(!g_autoPositioned){ ApplyAutoPos(); Draw(); ChartRedraw(0); return; }
+      Reposition(); ChartRedraw(0);
+   }
+
+   // Chart click — draw zone
+   if(id==CHARTEVENT_CLICK && isDrawing && !g_drag)
+   {
+      if(GetTickCount()-lastClickTime<200) return;
+      lastClickTime=GetTickCount();
+
+      int panelTop=PnlTopY(), panelBot=PnlBotY();
+      if(x>=g_ox && x<=g_ox+PW && y>=panelTop && y<=panelBot) return;
+
+      datetime t; double p; int w;
+      if(ChartXYToTimePrice(0,x,y,w,t,p))
+      {
+         if(clickStep==0)
+         {
+            startX=x; startY=y; startPrice=p; startTime=t;
+            currentObjName="ZoneRect_"+IntegerToString(GetTickCount());
+            datetime futureTime=TimeCurrent()+86400*365*10;
+
+            ObjectCreate(0,currentObjName,OBJ_RECTANGLE,0,startTime,startPrice,futureTime,startPrice);
+            ObjectSetInteger(0,currentObjName,OBJPROP_COLOR,      g_currentZoneColor);
+            ObjectSetInteger(0,currentObjName,OBJPROP_FILL,       true);
+            ObjectSetInteger(0,currentObjName,OBJPROP_BACK,       true);
+            ObjectSetInteger(0,currentObjName,OBJPROP_SELECTABLE, true);
+            ObjectSetInteger(0,currentObjName,OBJPROP_SELECTED,   true);
+            ObjectSetInteger(0,currentObjName,OBJPROP_HIDDEN,     false);
+            ObjectSetInteger(0,currentObjName,OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            clickStep=1;
+         }
+         else if(clickStep==1)
+         {
+            if(MathAbs(x-startX)<5 && MathAbs(y-startY)<5) return;
+            datetime futureTime=TimeCurrent()+86400*365*10;
+            ObjectSetInteger(0,currentObjName,OBJPROP_TIME,1,futureTime);
+            ObjectSetDouble (0,currentObjName,OBJPROP_PRICE,1,p);
+            ObjectSetInteger(0,currentObjName,OBJPROP_SELECTED,true);
+
+            isDrawing=false; clickStep=0;
+            if(ObjectFind(0,HDR_RECT_BTN)>=0)
+            {
+               ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_BGCOLOR,InpHdrBg);
+               ObjectSetInteger(0,HDR_RECT_BTN,OBJPROP_COLOR,  clrWhite);
+            }
+         }
+         ChartRedraw(0);
+      }
+   }
+}
+//+------------------------------------------------------------------+
