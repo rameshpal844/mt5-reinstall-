@@ -1,0 +1,822 @@
+//+------------------------------------------------------------------+
+//|  PnL_v43.mq5  — Auto-Detecting Broker Fix                      |
+//|  - Custom Invisible Magnetic Dragging (Bypasses MT5 Hitboxes)  |
+//|  - X buttons fully independent                                 |
+//|  - No auto-track locking                                       |
+//|  - Draggable panel                                             |
+//|  - Smart PnL scaling for all brokers/symbols                   |
+//|  - MODIFIED: X Cancel buttons on FAR LEFT, centered on line    |
+//|  - MODIFIED: SL On by default                                  |
+//|  - FIXED: 0-Price bug & Timeframe persistence                  |
+//|  - FIXED: "Handshake" sync with SmartChartControl added        |
+//|  - MODIFIED: Sleek UI with +/- integrated on main bar          |
+//|  - MODIFIED: Individual Step Sizes added per symbol category   |
+//|  - FIXED: SL/TP spawn distance uses robust price percentage    |
+//+------------------------------------------------------------------+
+#property copyright "PnL Calculator"
+#property version   "43.14"
+#property indicator_chart_window
+#property indicator_plots 0
+
+#define N_EN  "PNL_LN_EN"
+#define N_TP  "PNL_LN_TP"
+#define N_SL  "PNL_LN_SL"
+#define L_EN  "PNL_LB_EN"
+#define L_TP  "PNL_LB_TP"
+#define L_SL  "PNL_LB_SL"
+
+#define C_EN  "PNL_CX_EN" 
+#define C_TP  "PNL_CX_TP" 
+#define C_SL  "PNL_CX_SL" 
+
+#define G_TOG "PNL_TOG"
+#define G_BG1 "PNL_BG1"
+#define G_SID "PNL_SID"
+#define G_MIN "PNL_MIN"
+#define G_EDT "PNL_EDT"
+#define G_PLS "PNL_PLS"
+#define G_BEN "PNL_BEN"
+#define G_BTP "PNL_BTP"
+#define G_BSL "PNL_BSL"
+#define G_LIV "PNL_LIV"
+
+//====================================================================
+input group "=== Default Lot per Symbol ==="
+input double InpLotXAU    = 0.02;
+input double InpLotUS30   = 0.50;
+input double InpLotBTC    = 0.2;
+input double InpLotETH    = 0.05;
+input double InpLotFX     = 0.10;
+input double InpLotOther  = 0.01;
+
+input group "=== Lot Steps per Symbol ==="
+input double InpStepXAU   = 0.01;
+input double InpStepUS30  = 0.10;
+input double InpStepBTC   = 0.01;
+input double InpStepETH   = 0.01;
+input double InpStepFX    = 0.01;
+input double InpStepOther = 0.01;
+
+input group "=== Lot Controls ==="
+input double InpLotMin    = 0.001;
+input double InpLotMax    = 100.0;
+
+input group "=== Default Distance (points) ==="
+input int    InpTPPts     = 50;
+input int    InpSLPts     = 30;
+
+input group "=== Direction ==="
+input bool   InpBuyMode   = true;
+
+input group "=== Panel Start Position ==="
+input int    InpPanelX    = 10;
+input int    InpPanelY    = 80;
+input int    InpPanelW    = 166; 
+input color  InpBgColor   = C'12,18,30';
+input color  InpBdrColor  = C'38,58,92';
+
+input group "=== Labels ==="
+input int    InpLblOffX   = 10;
+input int    InpFontSize  = 10;
+input int    InpLblGap    = 20;
+input bool   InpShowPts   = false;
+
+input group "=== Colors ==="
+input color  InpCEntry    = C'41,182,246';
+input color  InpCTP       = C'38,198,149';
+input color  InpCSL       = C'239,83,80';
+
+input group "=== Line Styles & Dragging ==="
+input ENUM_LINE_STYLE InpStyleEntry = STYLE_DASHDOTDOT; 
+input ENUM_LINE_STYLE InpStyleTP    = STYLE_DASHDOTDOT; 
+input ENUM_LINE_STYLE InpStyleSL    = STYLE_DASHDOTDOT; 
+input int             InpLineWidth  = 1;
+input int             InpGrabPixels = 12;
+
+//====================================================================
+double g_lot    = 0.01;
+double g_entry  = 0, g_tp  = 0, g_sl  = 0;
+double g_tp_shd = 0, g_sl_shd = 0, g_en_shd = 0;
+
+int    g_en_mode = 0;
+int    g_tp_mode = 0;
+int    g_sl_mode = 2; // SL On by default
+
+bool   g_buy    = true;
+bool   g_open   = false;
+string g_lotstr = "0.01";
+
+int    g_px = 10, g_py = 80;
+bool   g_drag = false, g_lbtn = false;
+int    g_dsx=0,g_dsy=0,g_dox=0,g_doy=0,g_dmov=0;
+string g_drag_line = ""; 
+
+//====================================================================
+double PT()  { return SymbolInfoDouble(_Symbol, SYMBOL_POINT); }
+double TS()  { return SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE); }
+double TV()  { return SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE); }
+double CS()  { return SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE); }
+
+double SafeAsk()
+{
+   double p = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(p > 0.0) return p;
+   p = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(p > 0.0) return p;
+   MqlTick tick;
+   if(SymbolInfoTick(_Symbol, tick)) {
+       if(tick.ask > 0.0) return tick.ask;
+       if(tick.bid > 0.0) return tick.bid;
+       if(tick.last > 0.0) return tick.last;
+   }
+   p = iClose(_Symbol, _Period, 0);
+   return p;
+}
+
+double PnL(double price_open, double price_close, double lots, bool is_buy)
+{
+   double ts = TS(), tv = TV(), cs = CS();
+   if(ts < 1e-10 || tv < 1e-10) return 0.0;
+   
+   double dist = MathAbs(price_close - price_open);
+   double ticks = dist / ts;
+   
+   ENUM_SYMBOL_CALC_MODE mode = (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_CALC_MODE);
+   
+   if(mode == SYMBOL_CALC_MODE_FOREX) 
+   {
+       return ticks * tv * lots;
+   } 
+   else 
+   {
+       if(tv < (ts * 5.0) && cs > 1.0) 
+       {
+           return ticks * tv * cs * lots; 
+       } 
+       else 
+       {
+           return ticks * tv * lots;      
+       }
+   }
+}
+
+// Fixed Dynamic distance using a fixed percentage of live price
+double DefDist(bool is_tp) { 
+   double price = SafeAsk();
+   if(price <= 0.0) price = 1.0; 
+   return is_tp ? (price * 0.002) : (price * 0.001); 
+}
+
+double Thr()            { return PT() * 3.0; }
+
+double SymbolDefaultLot()
+{
+   string s=_Symbol; StringToUpper(s);
+   if(StringFind(s,"XAU")>=0||StringFind(s,"XAG")>=0)             return InpLotXAU;
+   if(StringFind(s,"US30")>=0||StringFind(s,"DJ30")>=0||
+      StringFind(s,"DOW")>=0||StringFind(s,"USTEC")>=0||
+      StringFind(s,"NAS")>=0||StringFind(s,"US500")>=0||
+      StringFind(s,"SPX")>=0||StringFind(s,"GER")>=0||
+      StringFind(s,"UK100")>=0)                                   return InpLotUS30;
+   if(StringFind(s,"ETH")>=0)                                     return InpLotETH;
+   if(StringFind(s,"BTC")>=0||StringFind(s,"LTC")>=0||
+      StringFind(s,"XRP")>=0||StringFind(s,"BNB")>=0)             return InpLotBTC;
+   int d=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   if(d==4||d==5) return InpLotFX;
+   return InpLotOther;
+}
+
+double SymbolLotStep()
+{
+   string s=_Symbol; StringToUpper(s);
+   if(StringFind(s,"XAU")>=0||StringFind(s,"XAG")>=0)             return InpStepXAU;
+   if(StringFind(s,"US30")>=0||StringFind(s,"DJ30")>=0||
+      StringFind(s,"DOW")>=0||StringFind(s,"USTEC")>=0||
+      StringFind(s,"NAS")>=0||StringFind(s,"US500")>=0||
+      StringFind(s,"SPX")>=0||StringFind(s,"GER")>=0||
+      StringFind(s,"UK100")>=0)                                   return InpStepUS30;
+   if(StringFind(s,"ETH")>=0)                                     return InpStepETH;
+   if(StringFind(s,"BTC")>=0||StringFind(s,"LTC")>=0||
+      StringFind(s,"XRP")>=0||StringFind(s,"BNB")>=0)             return InpStepBTC;
+   int d=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   if(d==4||d==5) return InpStepFX;
+   return InpStepOther;
+}
+
+bool EnOn() { return g_en_mode == 2; }
+bool TpOn() { return g_tp_mode == 2; }
+bool SlOn() { return g_sl_mode == 2; }
+
+double YtoP(int cx, int cy)
+{
+   double mn = ChartGetDouble(0, CHART_PRICE_MIN);
+   double mx = ChartGetDouble(0, CHART_PRICE_MAX);
+   if(ChartGetInteger(0, CHART_SCALEFIX))
+   {
+      mn = ChartGetDouble(0, CHART_FIXED_MIN);
+      mx = ChartGetDouble(0, CHART_FIXED_MAX);
+   }
+   int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+   if(ch<=0) return (mn+mx)*0.5;
+   return mn + (1.0-(double)cy/ch)*(mx-mn);
+}
+int PtoY(double p)
+{
+   double mn = ChartGetDouble(0, CHART_PRICE_MIN);
+   double mx = ChartGetDouble(0, CHART_PRICE_MAX);
+   if(ChartGetInteger(0, CHART_SCALEFIX))
+   {
+      mn = ChartGetDouble(0, CHART_FIXED_MIN);
+      mx = ChartGetDouble(0, CHART_FIXED_MAX);
+   }
+   int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+   if(mx<=mn) return ch/2;
+   return (int)(((mx-p)/(mx-mn))*(double)ch);
+}
+int CY(int y) { int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS); return MathMax(10,MathMin(y,ch-20)); }
+
+void ClampPanel()
+{
+   int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+   g_px=MathMax(0,MathMin(g_px,cw-InpPanelW-2));
+   g_py=MathMax(0,MathMin(g_py,ch-90));
+}
+
+bool HitTog(int mx,int my){ return(mx>=g_px && mx<=g_px+16 && my>=g_py && my<=g_py+18); }
+
+//====================================================================
+void P2(string n,int x,int y){ ObjectSetInteger(0,n,OBJPROP_XDISTANCE,x); ObjectSetInteger(0,n,OBJPROP_YDISTANCE,y); }
+
+void MkRect(string n,int x,int y,int w,int h,color bg,color bd)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_LEFT_UPPER); P2(n,x,y);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,w);    ObjectSetInteger(0,n,OBJPROP_YSIZE,h);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg); ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,bd);   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+}
+
+void MkBtn(string n,int x,int y,int w,int h,string t,color tc,color bg)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_LEFT_UPPER); P2(n,x,y);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,w);    ObjectSetInteger(0,n,OBJPROP_YSIZE,h);
+   ObjectSetString(0, n,OBJPROP_TEXT,t);     ObjectSetInteger(0,n,OBJPROP_COLOR,tc);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg); ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,tc);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,8); 
+   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+}
+
+void MkCancelBtn(string n, color tc, color bg)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_LEFT_UPPER); 
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,20);                 
+   ObjectSetInteger(0,n,OBJPROP_YSIZE,20);
+   ObjectSetString(0, n,OBJPROP_TEXT,"X");
+   ObjectSetInteger(0,n,OBJPROP_COLOR,tc);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
+   ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,tc);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,10);              
+   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE, -5000);         
+}
+
+void MkEdit(string n,int x,int y,int w,int h)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_EDIT,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_LEFT_UPPER); P2(n,x,y);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,w);         ObjectSetInteger(0,n,OBJPROP_YSIZE,h);
+   ObjectSetString(0, n,OBJPROP_TEXT,g_lotstr);    ObjectSetInteger(0,n,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,C'16,26,45'); ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,InpBdrColor);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,9); 
+   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,n,OBJPROP_ALIGN,ALIGN_CENTER); ObjectSetInteger(0,n,OBJPROP_BACK,false);
+}
+
+void MkLblChart(string n,color c)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,InpLblOffX);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,200);
+   ObjectSetString(0, n,OBJPROP_TEXT,"");
+   ObjectSetInteger(0,n,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,InpFontSize);
+   ObjectSetString(0, n,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+}
+
+void MkHLine(string n,double p,color c,int sty,int w)
+{
+   if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_HLINE,0,0,p);
+   ObjectSetDouble(0, n,OBJPROP_PRICE,p);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,n,OBJPROP_STYLE,sty);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,w);
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); 
+   ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+}
+void SLP(string n,double p){ ObjectSetDouble(0,n,OBJPROP_PRICE,0,p); }
+
+void ShowLine(string n,string lbl,color c,bool show)
+{
+   ObjectSetInteger(0,n,  OBJPROP_COLOR,     show ? c : clrNONE);
+   ObjectSetInteger(0,n,  OBJPROP_SELECTABLE,false); 
+   ObjectSetInteger(0,lbl,OBJPROP_COLOR,     show ? c : clrNONE);
+}
+
+//====================================================================
+void BuildUI()
+{
+   MkBtn(G_TOG, g_px, g_py, 16, 18, g_open?"v":">", clrWhite, C'22,34,58');
+   ObjectSetString(0, G_TOG, OBJPROP_TOOLTIP, "Drag here to move panel");
+   
+   MkBtn(G_BTP, g_px+16, g_py, 34, 18, "TP", InpCTP, InpBgColor);
+   ObjectSetString(0, G_BTP, OBJPROP_TOOLTIP, "lot size calculator");
+   
+   MkBtn(G_MIN, g_px+50, g_py, 16, 18, "-", InpCSL, InpBgColor);
+   ObjectSetString(0, G_MIN, OBJPROP_TOOLTIP, "lot size calculator");
+   
+   MkEdit(G_EDT, g_px+66, g_py, 50, 18);
+   ObjectSetString(0, G_EDT, OBJPROP_TOOLTIP, "lot size calculator");
+   
+   MkBtn(G_PLS, g_px+116, g_py, 16, 18, "+", InpCTP, InpBgColor);
+   ObjectSetString(0, G_PLS, OBJPROP_TOOLTIP, "lot size calculator");
+   
+   MkBtn(G_BSL, g_px+132, g_py, 34, 18, "SL", InpCSL, InpBgColor);
+   ObjectSetString(0, G_BSL, OBJPROP_TOOLTIP, "lot size calculator");
+   
+   MkRect(G_BG1, g_px, g_py+18, 166, 20, InpBgColor, InpBdrColor);
+   MkBtn(G_SID, g_px+2,  g_py+20, 46, 16, "BUY", clrWhite, C'0,110,45');
+   MkBtn(G_BEN, g_px+50, g_py+20, 54, 16, "ENTRY", InpCEntry, InpBgColor);
+   MkBtn(G_LIV, g_px+106,g_py+20, 58, 16, "LIVE", C'210,170,0', InpBgColor);
+}
+
+void MoveAll()
+{
+   ClampPanel();
+   int x=g_px, y=g_py;
+   P2(G_TOG, x, y);
+   ObjectSetString(0, G_TOG, OBJPROP_TEXT, g_open ? "v" : ">");
+   
+   P2(G_BTP, x+16, y);
+   P2(G_MIN, x+50, y);
+   P2(G_EDT, x+66, y);
+   P2(G_PLS, x+116, y);
+   P2(G_BSL, x+132, y);
+   
+   if(!g_open) {
+      ObjectSetInteger(0, G_BG1, OBJPROP_YDISTANCE, -5000);
+      ObjectSetInteger(0, G_SID, OBJPROP_YDISTANCE, -5000);
+      ObjectSetInteger(0, G_BEN, OBJPROP_YDISTANCE, -5000);
+      ObjectSetInteger(0, G_LIV, OBJPROP_YDISTANCE, -5000);
+      return;
+   }
+   
+   P2(G_BG1, x, y+18);
+   P2(G_SID, x+2, y+20);
+   P2(G_BEN, x+50, y+20);
+   P2(G_LIV, x+106, y+20);
+}
+
+void UpdateBtns()
+{
+   if(g_buy){
+      ObjectSetString(0,G_SID,OBJPROP_TEXT,"BUY");
+      ObjectSetInteger(0,G_SID,OBJPROP_BGCOLOR,C'0,110,45');
+      ObjectSetInteger(0,G_SID,OBJPROP_BORDER_COLOR,C'0,200,70');
+   } else {
+      ObjectSetString(0,G_SID,OBJPROP_TEXT,"SELL");
+      ObjectSetInteger(0,G_SID,OBJPROP_BGCOLOR,C'130,20,20');
+      ObjectSetInteger(0,G_SID,OBJPROP_BORDER_COLOR,C'220,40,40');
+   }
+   switch(g_en_mode){
+      case 0: ObjectSetString(0,G_BEN,OBJPROP_TEXT,"ENTRY"); ObjectSetInteger(0,G_BEN,OBJPROP_BGCOLOR,InpBgColor); break;
+      case 1: ObjectSetString(0,G_BEN,OBJPROP_TEXT,"EN >" ); ObjectSetInteger(0,G_BEN,OBJPROP_BGCOLOR,InpCEntry); break;
+      case 2: ObjectSetString(0,G_BEN,OBJPROP_TEXT,"EN x" ); ObjectSetInteger(0,G_BEN,OBJPROP_BGCOLOR,C'8,40,65'); break;
+   }
+   switch(g_tp_mode){
+      case 0: ObjectSetString(0,G_BTP,OBJPROP_TEXT,"TP"  ); ObjectSetInteger(0,G_BTP,OBJPROP_BGCOLOR,InpBgColor); break;
+      case 1: ObjectSetString(0,G_BTP,OBJPROP_TEXT,"TP >" ); ObjectSetInteger(0,G_BTP,OBJPROP_BGCOLOR,InpCTP); break;
+      case 2: ObjectSetString(0,G_BTP,OBJPROP_TEXT,"TP x" ); ObjectSetInteger(0,G_BTP,OBJPROP_BGCOLOR,C'8,45,30'); break;
+   }
+   switch(g_sl_mode){
+      case 0: ObjectSetString(0,G_BSL,OBJPROP_TEXT,"SL"  ); ObjectSetInteger(0,G_BSL,OBJPROP_BGCOLOR,InpBgColor); break;
+      case 1: ObjectSetString(0,G_BSL,OBJPROP_TEXT,"SL >" ); ObjectSetInteger(0,G_BSL,OBJPROP_BGCOLOR,InpCSL); break;
+      case 2: ObjectSetString(0,G_BSL,OBJPROP_TEXT,"SL x" ); ObjectSetInteger(0,G_BSL,OBJPROP_BGCOLOR,C'55,12,12'); break;
+   }
+}
+
+//====================================================================
+void Refresh()
+{
+   double ask = SafeAsk();
+   double ref = EnOn() ? g_entry : ask;
+
+   double tp_pnl = TpOn() ? PnL(ref, g_tp, g_lot, g_buy) : 0;
+   double sl_pnl = SlOn() ? PnL(ref, g_sl, g_lot, g_buy) : 0;
+   
+   double pt = PT();
+   int tp_pts = TpOn()&&pt>0 ? (int)MathRound(MathAbs(g_tp-ref)/pt) : 0;
+   int sl_pts = SlOn()&&pt>0 ? (int)MathRound(MathAbs(g_sl-ref)/pt) : 0;
+
+   int lx=InpLblOffX, mg=InpLblGap;
+   int bx=5; 
+   int bh_half = 10; 
+   
+   int ye_line=EnOn()?PtoY(g_entry):0;
+   int yt_line=TpOn()?PtoY(g_tp):0;
+   int ys_line=SlOn()?PtoY(g_sl):0;
+
+   if(EnOn()){
+      int yp_lbl = CY(ye_line+4);
+      ObjectSetInteger(0,L_EN,OBJPROP_XDISTANCE,lx);
+      ObjectSetInteger(0,L_EN,OBJPROP_YDISTANCE,yp_lbl);
+      ObjectSetString(0, L_EN,OBJPROP_TEXT,
+         g_en_mode==1?"ENTRY — click chart":
+         StringFormat("ENTRY  %.3f  %s",g_lot,g_buy?"BUY":"SELL"));
+         
+      ObjectSetInteger(0,C_EN,OBJPROP_XDISTANCE, bx);
+      ObjectSetInteger(0,C_EN,OBJPROP_YDISTANCE, CY(ye_line) - bh_half); 
+   } else {
+      ObjectSetInteger(0,C_EN,OBJPROP_YDISTANCE, -5000); 
+   }
+   
+   if(TpOn()){
+      int yp_lbl = CY(yt_line+4); if(EnOn()&&MathAbs(yp_lbl-CY(ye_line+4))<mg) yp_lbl=CY(yt_line-mg);
+      ObjectSetInteger(0,L_TP,OBJPROP_XDISTANCE,lx);
+      ObjectSetInteger(0,L_TP,OBJPROP_YDISTANCE,yp_lbl);
+      ObjectSetString(0, L_TP,OBJPROP_TEXT,
+         g_tp_mode==1?"TP — click chart":
+         InpShowPts?StringFormat("TP  +$%.2f  (%d pts)",tp_pnl,tp_pts):StringFormat("TP  +$%.2f",tp_pnl));
+         
+      ObjectSetInteger(0,C_TP,OBJPROP_XDISTANCE, bx);
+      ObjectSetInteger(0,C_TP,OBJPROP_YDISTANCE, CY(yt_line) - bh_half);
+   } else {
+      ObjectSetInteger(0,C_TP,OBJPROP_YDISTANCE, -5000); 
+   }
+   
+   if(SlOn()){
+      int yp_lbl = CY(ys_line+4); if(EnOn()&&MathAbs(yp_lbl-CY(ye_line+4))<mg) yp_lbl=CY(ys_line+mg);
+      ObjectSetInteger(0,L_SL,OBJPROP_XDISTANCE,lx);
+      ObjectSetInteger(0,L_SL,OBJPROP_YDISTANCE,yp_lbl);
+      ObjectSetString(0, L_SL,OBJPROP_TEXT,
+         g_sl_mode==1?"SL — click chart":
+         InpShowPts?StringFormat("SL  -$%.2f  (%d pts)",sl_pnl,sl_pts):StringFormat("SL  -$%.2f",sl_pnl));
+         
+      ObjectSetInteger(0,C_SL,OBJPROP_XDISTANCE, bx);
+      ObjectSetInteger(0,C_SL,OBJPROP_YDISTANCE, CY(ys_line) - bh_half); 
+   } else {
+      ObjectSetInteger(0,C_SL,OBJPROP_YDISTANCE, -5000); 
+   }
+   
+   ObjectSetString(0,G_EDT,OBJPROP_TEXT,g_lotstr);
+}
+
+//====================================================================
+int OnInit()
+{
+   g_px=InpPanelX; g_py=InpPanelY; g_buy=InpBuyMode;
+   g_lot=NormalizeDouble(SymbolDefaultLot(),3);
+   g_lotstr=DoubleToString(g_lot,3);
+   
+   double ask = SafeAsk();
+   
+   string gvLock = "PNL_LOCK_" + IntegerToString(ChartID());
+   if(GlobalVariableCheck(gvLock)) GlobalVariableDel(gvLock);
+   
+   string pre = "PNL_" + _Symbol;
+   if(GlobalVariableCheck(pre+"_SL")) {
+      g_sl      = GlobalVariableGet(pre+"_SL");
+      g_tp      = GlobalVariableGet(pre+"_TP");
+      g_entry   = GlobalVariableGet(pre+"_EN");
+      g_buy     = (GlobalVariableGet(pre+"_BUY") > 0.0);
+      g_sl_mode = (int)GlobalVariableGet(pre+"_MSL");
+      g_tp_mode = (int)GlobalVariableGet(pre+"_MTP");
+      g_en_mode = (int)GlobalVariableGet(pre+"_MEN");
+      
+      GlobalVariableDel(pre+"_SL"); GlobalVariableDel(pre+"_TP"); GlobalVariableDel(pre+"_EN");
+      GlobalVariableDel(pre+"_BUY"); GlobalVariableDel(pre+"_MSL"); GlobalVariableDel(pre+"_MTP"); GlobalVariableDel(pre+"_MEN");
+   } else {
+      g_entry = ask;
+      g_tp = ask + (g_buy ? DefDist(true) : -DefDist(true));
+      g_sl = ask + (g_buy ? -DefDist(false) : DefDist(false));
+      g_sl_mode = 2;
+      g_tp_mode = 0;
+      g_en_mode = 0;
+   }
+   
+   g_tp_shd=g_tp; g_sl_shd=g_sl; g_en_shd=g_entry;
+
+   MkHLine(N_EN, g_entry, clrNONE, InpStyleEntry, InpLineWidth);
+   MkHLine(N_TP, g_tp, clrNONE, InpStyleTP,  InpLineWidth);
+   MkHLine(N_SL, g_sl, clrNONE, InpStyleSL,  InpLineWidth);
+   
+   MkLblChart(L_EN,clrNONE);
+   MkLblChart(L_TP,clrNONE);
+   MkLblChart(L_SL,clrNONE);
+
+   MkCancelBtn(C_EN, clrWhite, InpCEntry);
+   MkCancelBtn(C_TP, clrWhite, InpCTP);
+   MkCancelBtn(C_SL, clrWhite, InpCSL);
+   
+   ShowLine(N_SL, L_SL, InpCSL, SlOn());
+   ShowLine(N_TP, L_TP, InpCTP, TpOn());
+   ShowLine(N_EN, L_EN, InpCEntry, EnOn());
+
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);
+   
+   BuildUI();
+   UpdateBtns();
+   Refresh();
+   MoveAll();
+   
+   EventSetMillisecondTimer(250);
+   ChartRedraw();
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int r)
+{
+   EventKillTimer();
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,false);
+   
+   string pre = "PNL_" + _Symbol;
+   string gvLock = "PNL_LOCK_" + IntegerToString(ChartID());
+   if(GlobalVariableCheck(gvLock)) GlobalVariableDel(gvLock);
+   
+   if(r == REASON_CHARTCHANGE) {
+       GlobalVariableTemp(pre+"_SL"); GlobalVariableSet(pre+"_SL", g_sl);
+       GlobalVariableTemp(pre+"_TP"); GlobalVariableSet(pre+"_TP", g_tp);
+       GlobalVariableTemp(pre+"_EN"); GlobalVariableSet(pre+"_EN", g_entry);
+       GlobalVariableTemp(pre+"_BUY"); GlobalVariableSet(pre+"_BUY", g_buy?1.0:0.0);
+       GlobalVariableTemp(pre+"_MSL"); GlobalVariableSet(pre+"_MSL", g_sl_mode);
+       GlobalVariableTemp(pre+"_MTP"); GlobalVariableSet(pre+"_MTP", g_tp_mode);
+       GlobalVariableTemp(pre+"_MEN"); GlobalVariableSet(pre+"_MEN", g_en_mode);
+   } else {
+       if(GlobalVariableCheck(pre+"_SL")) GlobalVariableDel(pre+"_SL");
+       if(GlobalVariableCheck(pre+"_TP")) GlobalVariableDel(pre+"_TP");
+       if(GlobalVariableCheck(pre+"_EN")) GlobalVariableDel(pre+"_EN");
+       if(GlobalVariableCheck(pre+"_BUY")) GlobalVariableDel(pre+"_BUY");
+       if(GlobalVariableCheck(pre+"_MSL")) GlobalVariableDel(pre+"_MSL");
+       if(GlobalVariableCheck(pre+"_MTP")) GlobalVariableDel(pre+"_MTP");
+       if(GlobalVariableCheck(pre+"_MEN")) GlobalVariableDel(pre+"_MEN");
+   }
+   
+   string a[]={N_EN,N_TP,N_SL,L_EN,L_TP,L_SL, C_EN, C_TP, C_SL,
+               G_TOG,G_BG1,G_SID,G_MIN,G_EDT,G_PLS,G_BEN,G_BTP,G_BSL,G_LIV};
+   for(int i=0;i<ArraySize(a);i++) ObjectDelete(0,a[i]);
+   ChartRedraw();
+}
+
+int OnCalculate(const int r,const int p,const datetime &t[],const double &o[],
+   const double &h[],const double &l[],const double &c[],
+   const long &tv[],const long &v[],const int &s[]) { return r; }
+
+//====================================================================
+void OnTimer()
+{
+   double thr=Thr();
+   if(EnOn()){
+      double ne=ObjectGetDouble(0,N_EN,OBJPROP_PRICE,0);
+      if(MathAbs(ne-g_en_shd)>thr && g_drag_line != N_EN){
+         double d=ne-g_entry; g_entry=ne; g_en_shd=g_entry;
+         if(TpOn()){ g_tp+=d; SLP(N_TP,g_tp); g_tp_shd=g_tp; }
+         if(SlOn()){ g_sl+=d; SLP(N_SL,g_sl); g_sl_shd=g_sl; }
+      }
+   }
+   if(TpOn() && g_drag_line != N_TP){
+      double nt=ObjectGetDouble(0,N_TP,OBJPROP_PRICE,0);
+      if(MathAbs(nt-g_tp_shd)>thr){ g_tp=nt; g_tp_shd=g_tp; }
+   }
+   if(SlOn() && g_drag_line != N_SL){
+      double ns=ObjectGetDouble(0,N_SL,OBJPROP_PRICE,0);
+      if(MathAbs(ns-g_sl_shd)>thr){ g_sl=ns; g_sl_shd=g_sl; }
+   }
+   Refresh();
+   ChartRedraw();
+}
+
+//====================================================================
+void OnChartEvent(const int id,const long &lp,const double &dp,const string &sp)
+{
+   int mx=(int)lp, my=(int)dp;
+
+   if(id==CHARTEVENT_MOUSE_MOVE)
+   {
+      bool btn=(StringToInteger(sp)&1)==1;
+      bool redrawNeeded = false;
+
+      int ye_hit = EnOn() ? PtoY(g_entry) : -10000;
+      int yt_hit = TpOn() ? PtoY(g_tp)    : -10000;
+      int ys_hit = SlOn() ? PtoY(g_sl)    : -10000;
+
+      // SYNC HANDSHAKE SIGNAL
+      string gvLock = "PNL_LOCK_" + IntegerToString(ChartID());
+      int pHeight = g_open ? 38 : 18; 
+      bool nearPanel = (mx >= g_px && mx <= g_px + InpPanelW && my >= g_py && my <= g_py + pHeight);
+      
+      bool nearLine = false;
+      if(EnOn() && MathAbs(my - ye_hit) <= InpGrabPixels) nearLine = true;
+      if(TpOn() && MathAbs(my - yt_hit) <= InpGrabPixels) nearLine = true;
+      if(SlOn() && MathAbs(my - ys_hit) <= InpGrabPixels) nearLine = true;
+
+      if(nearLine || nearPanel || g_drag || g_drag_line != "") {
+         GlobalVariableTemp(gvLock);
+         GlobalVariableSet(gvLock, 1.0);
+      } else {
+         if(GlobalVariableCheck(gvLock)) GlobalVariableDel(gvLock);
+      }
+
+      // --- MOUSE CLICK DOWN ---
+      if(btn && !g_lbtn){
+         if(HitTog(mx,my)){ 
+            g_drag=true; g_dmov=0; g_dsx=mx; g_dsy=my; g_dox=g_px; g_doy=g_py; 
+         }
+         else {
+            int best_dist = InpGrabPixels + 1;
+            if(EnOn() && MathAbs(my - ye_hit) < best_dist) { g_drag_line = N_EN; best_dist = MathAbs(my - ye_hit); }
+            if(TpOn() && MathAbs(my - yt_hit) < best_dist) { g_drag_line = N_TP; best_dist = MathAbs(my - yt_hit); }
+            if(SlOn() && MathAbs(my - ys_hit) < best_dist) { g_drag_line = N_SL; best_dist = MathAbs(my - ys_hit); }
+         }
+      }
+
+      // --- DRAGGING PANEL ---
+      if(btn && g_drag){
+         int ddx=mx-g_dsx, ddy=my-g_dsy;
+         g_dmov=MathMax(g_dmov,(int)MathSqrt((double)(ddx*ddx+ddy*ddy)));
+         g_px=g_dox+ddx; g_py=g_doy+ddy;
+         MoveAll(); redrawNeeded = true;
+      }
+
+      // --- DRAGGING A LINE ---
+      if(btn && g_drag_line != "") {
+         double new_p = YtoP(mx, my);
+         
+         if(g_drag_line == N_EN) {
+            double d = new_p - g_entry;
+            g_entry = new_p; g_en_shd = g_entry; SLP(N_EN, g_entry);
+            if(TpOn()){ g_tp += d; SLP(N_TP, g_tp); g_tp_shd = g_tp; }
+            if(SlOn()){ g_sl += d; SLP(N_SL, g_sl); g_sl_shd = g_sl; }
+         }
+         else if(g_drag_line == N_TP) { g_tp = new_p; g_tp_shd = g_tp; SLP(N_TP, g_tp); }
+         else if(g_drag_line == N_SL) { g_sl = new_p; g_sl_shd = g_sl; SLP(N_SL, g_sl); }
+         
+         Refresh(); redrawNeeded = true;
+      }
+
+      // --- MOUSE RELEASE ---
+      if(!btn){
+         if(g_drag){
+            if(g_dmov<6){
+               g_open=!g_open;
+               MoveAll();
+               UpdateBtns(); redrawNeeded = true;
+            }
+            g_drag=false;
+         }
+         g_drag_line = ""; 
+      }
+      
+      if(redrawNeeded) ChartRedraw();
+      g_lbtn=btn; return;
+   }
+
+   if(id==CHARTEVENT_CLICK)
+   {
+      double price=YtoP(mx,my);
+      double ref=EnOn()?g_entry:SafeAsk();
+
+      if(g_en_mode==1){
+         g_entry=price; g_en_shd=g_entry;
+         SLP(N_EN,g_entry);
+         ShowLine(N_EN,L_EN,InpCEntry,true);
+         g_en_mode=2;
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+      if(g_tp_mode==1){
+         if(g_buy && price<ref) price=ref+MathAbs(price-ref);
+         if(!g_buy && price>ref) price=ref-MathAbs(price-ref);
+         g_tp=price; g_tp_shd=g_tp;
+         SLP(N_TP,g_tp);
+         ShowLine(N_TP,L_TP,InpCTP,true);
+         g_tp_mode=2;
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+      if(g_sl_mode==1){
+         if(g_buy && price>ref) price=ref-MathAbs(price-ref);
+         if(!g_buy && price<ref) price=ref+MathAbs(price-ref);
+         g_sl=price; g_sl_shd=g_sl;
+         SLP(N_SL,g_sl);
+         ShowLine(N_SL,L_SL,InpCSL,true);
+         g_sl_mode=2;
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+   }
+
+   if(id==CHARTEVENT_OBJECT_CLICK)
+   {
+      if(sp==C_EN){
+         ObjectSetInteger(0,C_EN,OBJPROP_STATE,false);
+         ShowLine(N_EN,L_EN,InpCEntry,false);
+         g_en_mode=0; 
+         ObjectSetInteger(0,C_EN,OBJPROP_YDISTANCE, -5000); 
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+      if(sp==C_TP){
+         ObjectSetInteger(0,C_TP,OBJPROP_STATE,false);
+         ShowLine(N_TP,L_TP,InpCTP,false);
+         g_tp_mode=0; 
+         ObjectSetInteger(0,C_TP,OBJPROP_YDISTANCE, -5000); 
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+      if(sp==C_SL){
+         ObjectSetInteger(0,C_SL,OBJPROP_STATE,false);
+         ShowLine(N_SL,L_SL,InpCSL,false);
+         g_sl_mode=0; 
+         ObjectSetInteger(0,C_SL,OBJPROP_YDISTANCE, -5000); 
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_TOG){ ObjectSetInteger(0,G_TOG,OBJPROP_STATE,false); return; }
+
+      if(sp==G_BEN){
+         ObjectSetInteger(0,G_BEN,OBJPROP_STATE,false);
+         if(g_en_mode==0){
+            g_entry=SafeAsk(); SLP(N_EN,g_entry); g_en_shd=g_entry;
+            ShowLine(N_EN,L_EN,InpCEntry,true);
+            g_en_mode=1;
+         } else {
+            ShowLine(N_EN,L_EN,InpCEntry,false);
+            g_en_mode=0;
+         }
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_BTP){
+         ObjectSetInteger(0,G_BTP,OBJPROP_STATE,false);
+         if(g_tp_mode==0){
+            double ref=EnOn()?g_entry:SafeAsk();
+            g_tp=ref+(g_buy?DefDist(true):-DefDist(true));
+            SLP(N_TP,g_tp); g_tp_shd=g_tp;
+            ShowLine(N_TP,L_TP,InpCTP,true);
+            g_tp_mode=1;
+         } else {
+            ShowLine(N_TP,L_TP,InpCTP,false);
+            g_tp_mode=0;
+         }
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_BSL){
+         ObjectSetInteger(0,G_BSL,OBJPROP_STATE,false);
+         if(g_sl_mode==0){
+            double ref=EnOn()?g_entry:SafeAsk();
+            g_sl=ref+(g_buy?-DefDist(false):DefDist(false));
+            SLP(N_SL,g_sl); g_sl_shd=g_sl;
+            ShowLine(N_SL,L_SL,InpCSL,true);
+            g_sl_mode=1;
+         } else {
+            ShowLine(N_SL,L_SL,InpCSL,false);
+            g_sl_mode=0;
+         }
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_LIV){
+         ObjectSetInteger(0,G_LIV,OBJPROP_STATE,false);
+         if(EnOn()){ g_entry=SafeAsk(); SLP(N_EN,g_entry); g_en_shd=g_entry; }
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_SID){
+         ObjectSetInteger(0,G_SID,OBJPROP_STATE,false);
+         g_buy=!g_buy;
+         double ref=EnOn()?g_entry:SafeAsk();
+         if(TpOn()){ double d=MathAbs(g_tp-ref); g_tp=g_buy?ref+d:ref-d; SLP(N_TP,g_tp); g_tp_shd=g_tp; }
+         if(SlOn()){ double d=MathAbs(g_sl-ref); g_sl=g_buy?ref-d:ref+d; SLP(N_SL,g_sl); g_sl_shd=g_sl; }
+         UpdateBtns(); Refresh(); ChartRedraw(); return;
+      }
+
+      if(sp==G_PLS){ g_lot=NormalizeDouble(MathMin(g_lot+SymbolLotStep(),InpLotMax),3); g_lotstr=DoubleToString(g_lot,3); ObjectSetInteger(0,G_PLS,OBJPROP_STATE,false); Refresh(); ChartRedraw(); return; }
+      if(sp==G_MIN){ g_lot=NormalizeDouble(MathMax(g_lot-SymbolLotStep(),InpLotMin),3); g_lotstr=DoubleToString(g_lot,3); ObjectSetInteger(0,G_MIN,OBJPROP_STATE,false); Refresh(); ChartRedraw(); return; }
+   }
+
+   if(id==CHARTEVENT_OBJECT_ENDEDIT && sp==G_EDT){
+      double v=StringToDouble(ObjectGetString(0,G_EDT,OBJPROP_TEXT));
+      if(v>=InpLotMin && v<=InpLotMax) g_lot=NormalizeDouble(v,3);
+      g_lotstr=DoubleToString(g_lot,3);
+      ObjectSetString(0,G_EDT,OBJPROP_TEXT,g_lotstr);
+      Refresh(); ChartRedraw();
+   }
+}
+//+------------------------------------------------------------------+
