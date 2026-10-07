@@ -1,0 +1,303 @@
+//+------------------------------------------------------------------+
+//|  CPR_DWM.mq5 — Central Pivot Range (Daily / Weekly / Monthly)   |
+//|  Filled channel. Current period only. v7                         |
+//|                                                                  |
+//|  FIX 1 — Pivot dotted/dashed lost when width>1:                 |
+//|    MT5 engine IGNORES style and forces SOLID whenever width>1.   |
+//|    Solution: pivot lines are ALWAYS drawn at width=1.            |
+//|    For visual thickness, we draw (width) parallel offset lines   |
+//|    each at width=1, spaced 1 point apart.                        |
+//|                                                                  |
+//|  FIX 2 — Monthly fill invisible when CPR inside Weekly zone:     |
+//|    MT5 draws OBJPROP_BACK rectangles in ALPHABETICAL NAME order. |
+//|    Old names: CPR5_D_FILL, CPR5_M_FILL, CPR5_W_FILL             |
+//|    → M painted after D but before W, so W covers M entirely.    |
+//|    Fix: prefix with sort-key: CPR5_1M_, CPR5_2W_, CPR5_3D_      |
+//|    → Monthly drawn first (bottom), Daily drawn last (top).       |
+//|    Lines always render above fills so TC/BC/PP always visible.   |
+//+------------------------------------------------------------------+
+#property copyright "Ramesh"
+#property version   "7.00"
+#property indicator_chart_window
+#property indicator_plots 0
+
+// ══════════════════════════════════════════════════════════════════
+//  DAILY  —  Blue theme
+// ══════════════════════════════════════════════════════════════════
+input group            "═══ DAILY CPR ═══"
+input bool             D_Show         = true;
+input color            D_FillColor    = C'173,216,230';
+input color            D_LineColor    = clrDodgerBlue;
+input int              D_LineWidth    = 1;
+input ENUM_LINE_STYLE  D_LineStyle    = STYLE_SOLID;
+input color            D_PivotColor   = clrDodgerBlue;
+input int              D_PivotWidth   = 1;
+input ENUM_LINE_STYLE  D_PivotStyle   = STYLE_DOT;
+
+// ══════════════════════════════════════════════════════════════════
+//  WEEKLY  —  Yellow theme
+// ══════════════════════════════════════════════════════════════════
+input group            "═══ WEEKLY CPR ═══"
+input bool             W_Show         = true;
+input color            W_FillColor    = C'255,255,153';
+input color            W_LineColor    = clrGold;
+input int              W_LineWidth    = 1;
+input ENUM_LINE_STYLE  W_LineStyle    = STYLE_SOLID;
+input color            W_PivotColor   = clrGold;
+input int              W_PivotWidth   = 1;
+input ENUM_LINE_STYLE  W_PivotStyle   = STYLE_DOT;
+
+// ══════════════════════════════════════════════════════════════════
+//  MONTHLY  —  Red / Pink theme
+// ══════════════════════════════════════════════════════════════════
+input group            "═══ MONTHLY CPR ═══"
+input bool             M_Show         = true;
+input color            M_FillColor    = C'255,182,193';
+input color            M_LineColor    = clrCrimson;
+input int              M_LineWidth    = 2;
+input ENUM_LINE_STYLE  M_LineStyle    = STYLE_SOLID;
+input color            M_PivotColor   = clrCrimson;
+input int              M_PivotWidth   = 1;
+input ENUM_LINE_STYLE  M_PivotStyle   = STYLE_DOT;
+
+// ── Prefix with numeric sort key so MT5 draws fills in correct Z order:
+//    1M (Monthly) → 2W (Weekly) → 3D (Daily)  [alphabetical = draw order]
+//    Monthly is at the bottom, Daily on top.
+#define PFX_M  "CPR5_1M_"
+#define PFX_W  "CPR5_2W_"
+#define PFX_D  "CPR5_3D_"
+
+//──────────────────────────────────────────────────────────────────
+void DeleteAllObjects()
+{
+   string pfxArr[]={PFX_M,PFX_W,PFX_D};
+   string sfx[]   ={"FILL","TC","BC","PP"};
+   for(int p=0;p<3;p++)
+   {
+      for(int s=0;s<4;s++)
+         ObjectDelete(0,pfxArr[p]+sfx[s]);
+      for(int k=1;k<=9;k++)
+         ObjectDelete(0,pfxArr[p]+"PP_"+IntegerToString(k));
+   }
+}
+
+//──────────────────────────────────────────────────────────────────
+bool GetPrevHLC(ENUM_TIMEFRAMES tf,double &h,double &l,double &c)
+{
+   double hi[],lo[],cl[];
+   if(CopyHigh (Symbol(),tf,1,1,hi)<1) return false;
+   if(CopyLow  (Symbol(),tf,1,1,lo)<1) return false;
+   if(CopyClose(Symbol(),tf,1,1,cl)<1) return false;
+   h=hi[0]; l=lo[0]; c=cl[0];
+   return true;
+}
+
+datetime GetPeriodStart(ENUM_TIMEFRAMES tf)
+{
+   datetime t[];
+   if(CopyTime(Symbol(),tf,0,1,t)<1) return 0;
+   return t[0];
+}
+
+datetime GetPeriodEnd(ENUM_TIMEFRAMES tf)
+{
+   datetime s=GetPeriodStart(tf);
+   if(s==0) return 0;
+   switch(tf)
+   {
+      case PERIOD_D1:  return s+86400;
+      case PERIOD_W1:  return s+7*86400;
+      case PERIOD_MN1:
+      {
+         MqlDateTime st; TimeToStruct(s,st);
+         if(++st.mon>12){st.mon=1;st.year++;}
+         st.day=1; st.hour=0; st.min=0; st.sec=0;
+         return StructToTime(st);
+      }
+   }
+   return s+86400;
+}
+
+//──────────────────────────────────────────────────────────────────
+// Basic flat OBJ_TREND line — no ray, not selectable
+//──────────────────────────────────────────────────────────────────
+void SetLine(string name,double price,datetime t1,datetime t2,
+             color clr,int width,ENUM_LINE_STYLE style,string tip)
+{
+   if(ObjectFind(0,name)<0)
+      ObjectCreate(0,name,OBJ_TREND,0,t1,price,t2,price);
+
+   ObjectSetInteger(0,name,OBJPROP_TIME, 0,t1);
+   ObjectSetInteger(0,name,OBJPROP_TIME, 1,t2);
+   ObjectSetDouble (0,name,OBJPROP_PRICE,0,price);
+   ObjectSetDouble (0,name,OBJPROP_PRICE,1,price);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,     clr);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,     width);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,     style);
+   ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0,name,OBJPROP_RAY_LEFT,  false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,    true);
+   ObjectSetString (0,name,OBJPROP_TOOLTIP,   tip);
+   ObjectSetString (0,name,OBJPROP_TEXT,      tip);
+}
+
+//──────────────────────────────────────────────────────────────────
+// FIX 1 — Pivot line with preserved dot/dash style at any width.
+//
+// MT5 hard rule: STYLE_DOT / STYLE_DASH only render when width == 1.
+// Workaround: draw `reqWidth` parallel lines each at width=1,
+// offset symmetrically by 1 point so they fan out and give the
+// appearance of a thicker dotted line.
+//
+// width=1 → 1 line  at price
+// width=2 → 2 lines at price±0.5pt  (price, price+1pt)
+// width=3 → 3 lines at price-1pt, price, price+1pt
+//──────────────────────────────────────────────────────────────────
+void SetPivotLine(string baseName,double price,datetime t1,datetime t2,
+                  color clr,int reqWidth,ENUM_LINE_STYLE style,string tip)
+{
+   // SOLID style: MT5 handles width natively, one line is enough.
+   if(style==STYLE_SOLID)
+   {
+      SetLine(baseName,price,t1,t2,clr,reqWidth,style,tip);
+      for(int k=1;k<=9;k++)
+         ObjectDelete(0,baseName+"_"+IntegerToString(k));
+      return;
+   }
+
+   // DOT / DASH / etc.: must keep each line at width=1.
+   int n=(reqWidth<1)?1:(reqWidth>9)?9:reqWidth;
+   double step=_Point;
+   // Spread lines symmetrically: centre at price
+   double startOffset= -((n-1)*step)/2.0;
+
+   for(int k=0;k<n;k++)
+   {
+      double  op   = price + startOffset + k*step;
+      string  nm   = (k==0) ? baseName : baseName+"_"+IntegerToString(k);
+      string  tt   = (k==0) ? tip : "";
+      SetLine(nm,op,t1,t2,clr,1,style,tt);
+   }
+   // Remove stale extra lines from a previous larger-width setting
+   for(int k=n;k<=9;k++)
+      ObjectDelete(0,baseName+"_"+IntegerToString(k));
+}
+
+//──────────────────────────────────────────────────────────────────
+// Filled rectangle — OBJPROP_BACK=true → behind candles.
+// Z-order among back-rects is alphabetical by object name,
+// so the CPR5_1M_ / CPR5_2W_ / CPR5_3D_ prefixes control layering.
+//──────────────────────────────────────────────────────────────────
+void SetFill(string name,double tc,double bc,
+             datetime t1,datetime t2,color fillClr)
+{
+   if(ObjectFind(0,name)<0)
+      ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,tc,t2,bc);
+
+   ObjectSetInteger(0,name,OBJPROP_TIME, 0,t1);
+   ObjectSetInteger(0,name,OBJPROP_TIME, 1,t2);
+   ObjectSetDouble (0,name,OBJPROP_PRICE,0,tc);
+   ObjectSetDouble (0,name,OBJPROP_PRICE,1,bc);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,      fillClr);
+   ObjectSetInteger(0,name,OBJPROP_FILL,       true);
+   ObjectSetInteger(0,name,OBJPROP_BACK,       true);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,      STYLE_SOLID);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,      1);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,     true);
+   ObjectSetString (0,name,OBJPROP_TOOLTIP,    "");
+}
+
+//──────────────────────────────────────────────────────────────────
+void DeleteCPR(string pfx)
+{
+   ObjectDelete(0,pfx+"FILL");
+   ObjectDelete(0,pfx+"TC");
+   ObjectDelete(0,pfx+"BC");
+   ObjectDelete(0,pfx+"PP");
+   for(int k=1;k<=9;k++)
+      ObjectDelete(0,pfx+"PP_"+IntegerToString(k));
+}
+
+//──────────────────────────────────────────────────────────────────
+void DrawCPR(string pfx,
+             double h,double l,double c,
+             datetime t1,datetime t2,
+             color fillClr,
+             color lineClr, int lineWidth, ENUM_LINE_STYLE lineStyle,
+             color pivotClr,int pivotWidth,ENUM_LINE_STYLE pivotStyle,
+             string label)
+{
+   double pivot=(h+l+c)/3.0;
+   double bc   =(h+l)  /2.0;
+   double tc   =2.0*pivot-bc;
+
+   SetFill(pfx+"FILL",tc,bc,t1,t2,fillClr);
+
+   SetLine(pfx+"TC",tc,t1,t2,lineClr,lineWidth,lineStyle,
+           label+" TC = "+DoubleToString(tc,_Digits));
+   SetLine(pfx+"BC",bc,t1,t2,lineClr,lineWidth,lineStyle,
+           label+" BC = "+DoubleToString(bc,_Digits));
+
+   SetPivotLine(pfx+"PP",pivot,t1,t2,pivotClr,pivotWidth,pivotStyle,
+                label+" Pivot = "+DoubleToString(pivot,_Digits));
+}
+
+//──────────────────────────────────────────────────────────────────
+void RefreshCPR()
+{
+   double h,l,c;
+   datetime t1,t2;
+
+   // Draw order does NOT matter here for Z — the object NAME prefix
+   // controls the back-rect layering.  We still do M→W→D for clarity.
+
+   // MONTHLY — PFX_M = "CPR5_1M_"  → alphabetically first = bottom fill layer
+   t1=GetPeriodStart(PERIOD_MN1); t2=GetPeriodEnd(PERIOD_MN1);
+   if(M_Show && GetPrevHLC(PERIOD_MN1,h,l,c))
+      DrawCPR(PFX_M,h,l,c,t1,t2,
+              M_FillColor,M_LineColor,M_LineWidth,M_LineStyle,
+              M_PivotColor,M_PivotWidth,M_PivotStyle,"Monthly");
+   else
+      DeleteCPR(PFX_M);
+
+   // WEEKLY — PFX_W = "CPR5_2W_"  → middle fill layer
+   t1=GetPeriodStart(PERIOD_W1); t2=GetPeriodEnd(PERIOD_W1);
+   if(W_Show && GetPrevHLC(PERIOD_W1,h,l,c))
+      DrawCPR(PFX_W,h,l,c,t1,t2,
+              W_FillColor,W_LineColor,W_LineWidth,W_LineStyle,
+              W_PivotColor,W_PivotWidth,W_PivotStyle,"Weekly");
+   else
+      DeleteCPR(PFX_W);
+
+   // DAILY — PFX_D = "CPR5_3D_"   → alphabetically last = top fill layer
+   t1=GetPeriodStart(PERIOD_D1); t2=GetPeriodEnd(PERIOD_D1);
+   if(D_Show && GetPrevHLC(PERIOD_D1,h,l,c))
+      DrawCPR(PFX_D,h,l,c,t1,t2,
+              D_FillColor,D_LineColor,D_LineWidth,D_LineStyle,
+              D_PivotColor,D_PivotWidth,D_PivotStyle,"Daily");
+   else
+      DeleteCPR(PFX_D);
+
+   ChartRedraw(0);
+}
+
+//──────────────────────────────────────────────────────────────────
+int OnInit()   { EventSetTimer(60); RefreshCPR(); return INIT_SUCCEEDED; }
+void OnTimer() { RefreshCPR(); }
+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double   &open[],
+                const double   &high[],
+                const double   &low[],
+                const double   &close[],
+                const long     &tick_volume[],
+                const long     &volume[],
+                const int      &spread[])
+{ RefreshCPR(); return rates_total; }
+
+void OnDeinit(const int reason)
+{ EventKillTimer(); DeleteAllObjects(); ChartRedraw(0); }
