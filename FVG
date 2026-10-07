@@ -1,0 +1,444 @@
+//+------------------------------------------------------------------+
+//|        Imbalance Detector [LuxAlgo] - MQL5 Port v7              |
+//|  Original: © LuxAlgo (CC BY-NC-SA 4.0)                          |
+//|  v7: FVG extends to right edge until mitigated (customizable)   |
+//+------------------------------------------------------------------+
+#property copyright "LuxAlgo MQL5 Port"
+#property version   "7.00"
+#property indicator_chart_window
+#property indicator_plots 0
+
+//============================================================
+// INPUTS
+//============================================================
+input group    "=== Fair Value Gaps ==="
+input bool     Show_FVG            = true;          // Show FVG
+input color    Bull_FVG_Color      = clrDodgerBlue; // Bullish FVG Color
+input color    Bear_FVG_Color      = clrRed;        // Bearish FVG Color
+input bool     FVG_UseMinWidth     = false;         // Use Min Width Filter
+input double   FVG_MinWidth        = 0.0;           // Min Width Value
+input string   FVG_Method          = "Points";      // Points / Pct / ATR
+input bool     FVG_ExtendToRight   = true;          // Extend FVG to right until mitigated
+input int      FVG_ExtendBars      = 0;             // Extend bars (only if above = false)
+
+input group    "=== Opening Gaps ==="
+input bool     Show_OG         = true;          // Show OG
+input color    Bull_OG_Color   = clrDodgerBlue; // Bullish OG Color
+input color    Bear_OG_Color   = clrRed;        // Bearish OG Color
+input bool     OG_UseMinWidth  = false;         // Use Min Width Filter
+input double   OG_MinWidth     = 0.0;           // Min Width Value
+input string   OG_Method       = "Points";      // Points / Pct / ATR
+input int      OG_Extend       = 0;             // Extend right (bars)
+
+input group    "=== Volume Imbalances ==="
+input bool     Show_VI         = true;          // Show VI
+input color    Bull_VI_Color   = clrDodgerBlue; // Bullish VI Color
+input color    Bear_VI_Color   = clrRed;        // Bearish VI Color
+input bool     VI_UseMinWidth  = false;         // Use Min Width Filter
+input double   VI_MinWidth     = 0.0;           // Min Width Value
+input string   VI_Method       = "Points";      // Points / Pct / ATR
+input int      VI_Extend       = 5;             // Extend right (bars)
+
+//============================================================
+// FVG TRACKING STRUCT
+//============================================================
+struct FVGZone
+{
+   string   boxName;
+   string   lineName;
+   double   top;
+   double   btm;
+   bool     isBull;
+};
+
+FVGZone  g_fvgZones[];
+
+//============================================================
+// GLOBALS
+//============================================================
+string   g_prefix  = "IMB_";
+int      g_cnt     = 0;
+int      g_atr     = INVALID_HANDLE;
+double   g_atrBuf[];
+
+// Far-future datetime used to stretch objects to chart right edge
+// ~10 years ahead is enough for any visible chart
+datetime FAR_FUTURE = 0;
+
+//------------------------------------------------------------
+// Blend color toward white (simulate transparency)
+//------------------------------------------------------------
+color BlendToWhite(color c, int alpha)
+{
+   int r = (int)((c >> 16) & 0xFF);
+   int g = (int)((c >>  8) & 0xFF);
+   int b = (int)( c        & 0xFF);
+   r = r + (255 - r) * alpha / 255;
+   g = g + (255 - g) * alpha / 255;
+   b = b + (255 - b) * alpha / 255;
+   return (color)(((int)r << 16) | ((int)g << 8) | (int)b);
+}
+
+string MakeName(string tag)
+{
+   g_cnt++;
+   return g_prefix + tag + IntegerToString(g_cnt);
+}
+
+bool WidthOK(bool use, string method, double minW,
+             double top, double btm, double atrV)
+{
+   if(!use) return true;
+   double d = top - btm;
+   if(method == "Points") return d > minW * _Point;
+   if(method == "Pct")    return (btm > 0.0) ? (d / btm * 100.0) > minW : false;
+   if(method == "ATR")    return d > atrV * minW;
+   return true;
+}
+
+//------------------------------------------------------------
+// Calculate the right-side datetime for a new FVG
+// If ExtendToRight=true  → stretch to FAR_FUTURE (right edge)
+// If ExtendToRight=false → fixed number of bars ahead
+//------------------------------------------------------------
+datetime FVGRightTime(datetime barTime, long barSec)
+{
+   if(FVG_ExtendToRight)
+      return FAR_FUTURE;
+   return barTime + barSec * FVG_ExtendBars;
+}
+
+//------------------------------------------------------------
+// Update the right edge of an existing object to FAR_FUTURE
+// (used after recalc to keep live zones pinned to right edge)
+//------------------------------------------------------------
+void StretchObjRight(string name)
+{
+   if(name == "" || !FVG_ExtendToRight) return;
+   if(ObjectFind(0, name) < 0) return;
+   ObjectSetInteger(0, name, OBJPROP_TIME, 1, FAR_FUTURE);
+}
+
+//------------------------------------------------------------
+// Draw filled box — returns object name
+//------------------------------------------------------------
+string FillBox(datetime t1, double top, datetime t2, double btm,
+               color clr, int alpha)
+{
+   if(top <= btm || t1 >= t2) return "";
+   color fc = BlendToWhite(clr, alpha);
+   string n = MakeName("R");
+   if(!ObjectCreate(0, n, OBJ_RECTANGLE, 0, t1, top, t2, btm)) return "";
+   ObjectSetInteger(0, n, OBJPROP_COLOR,      (int)fc);
+   ObjectSetInteger(0, n, OBJPROP_STYLE,      STYLE_SOLID);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH,      1);
+   ObjectSetInteger(0, n, OBJPROP_FILL,       true);
+   ObjectSetInteger(0, n, OBJPROP_BACK,       true);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, n, OBJPROP_HIDDEN,     true);
+   return n;
+}
+
+//------------------------------------------------------------
+// Draw midline — returns object name
+//------------------------------------------------------------
+string MidLine(datetime t1, double price, datetime t2, color clr)
+{
+   if(t1 >= t2) return "";
+   string n = MakeName("L");
+   if(!ObjectCreate(0, n, OBJ_TREND, 0, t1, price, t2, price)) return "";
+   ObjectSetInteger(0, n, OBJPROP_COLOR,      (int)clr);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH,      1);
+   ObjectSetInteger(0, n, OBJPROP_STYLE,      STYLE_SOLID);
+   ObjectSetInteger(0, n, OBJPROP_RAY_RIGHT,  false);
+   ObjectSetInteger(0, n, OBJPROP_BACK,       true);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, n, OBJPROP_HIDDEN,     true);
+   return n;
+}
+
+//------------------------------------------------------------
+// Dotted border box (VI)
+//------------------------------------------------------------
+void DotBox(datetime t1, double top, datetime t2, double btm, color clr)
+{
+   if(top <= btm || t1 >= t2) return;
+   string nTop = MakeName("DT");
+   string nBot = MakeName("DB");
+   string nLft = MakeName("DL");
+
+   if(ObjectCreate(0, nTop, OBJ_TREND, 0, t1, top, t2, top))
+   {
+      ObjectSetInteger(0, nTop, OBJPROP_COLOR,      (int)clr);
+      ObjectSetInteger(0, nTop, OBJPROP_STYLE,      STYLE_DOT);
+      ObjectSetInteger(0, nTop, OBJPROP_WIDTH,      1);
+      ObjectSetInteger(0, nTop, OBJPROP_RAY_RIGHT,  false);
+      ObjectSetInteger(0, nTop, OBJPROP_BACK,       true);
+      ObjectSetInteger(0, nTop, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, nTop, OBJPROP_HIDDEN,     true);
+   }
+   if(ObjectCreate(0, nBot, OBJ_TREND, 0, t1, btm, t2, btm))
+   {
+      ObjectSetInteger(0, nBot, OBJPROP_COLOR,      (int)clr);
+      ObjectSetInteger(0, nBot, OBJPROP_STYLE,      STYLE_DOT);
+      ObjectSetInteger(0, nBot, OBJPROP_WIDTH,      1);
+      ObjectSetInteger(0, nBot, OBJPROP_RAY_RIGHT,  false);
+      ObjectSetInteger(0, nBot, OBJPROP_BACK,       true);
+      ObjectSetInteger(0, nBot, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, nBot, OBJPROP_HIDDEN,     true);
+   }
+   if(ObjectCreate(0, nLft, OBJ_TREND, 0, t1, top, t1, btm))
+   {
+      ObjectSetInteger(0, nLft, OBJPROP_COLOR,      (int)clr);
+      ObjectSetInteger(0, nLft, OBJPROP_STYLE,      STYLE_DOT);
+      ObjectSetInteger(0, nLft, OBJPROP_WIDTH,      1);
+      ObjectSetInteger(0, nLft, OBJPROP_RAY_RIGHT,  false);
+      ObjectSetInteger(0, nLft, OBJPROP_BACK,       true);
+      ObjectSetInteger(0, nLft, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, nLft, OBJPROP_HIDDEN,     true);
+   }
+}
+
+//------------------------------------------------------------
+// OG label
+//------------------------------------------------------------
+void OGLabel(datetime t, double price)
+{
+   string n = MakeName("OG");
+   if(!ObjectCreate(0, n, OBJ_TEXT, 0, t, price)) return;
+   ObjectSetString(0,  n, OBJPROP_TEXT,       "OG");
+   ObjectSetInteger(0, n, OBJPROP_COLOR,      (int)clrWhite);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE,   8);
+   ObjectSetInteger(0, n, OBJPROP_ANCHOR,     ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, n, OBJPROP_HIDDEN,     true);
+}
+
+//------------------------------------------------------------
+// Register FVG zone
+//------------------------------------------------------------
+void RegisterFVG(string boxN, string lineN, double top, double btm, bool isBull)
+{
+   if(boxN == "" && lineN == "") return;
+   int sz = ArraySize(g_fvgZones);
+   ArrayResize(g_fvgZones, sz + 1);
+   g_fvgZones[sz].boxName  = boxN;
+   g_fvgZones[sz].lineName = lineN;
+   g_fvgZones[sz].top      = top;
+   g_fvgZones[sz].btm      = btm;
+   g_fvgZones[sz].isBull   = isBull;
+}
+
+//------------------------------------------------------------
+// PurgeFilled — remove zones price has entered
+// Bull FVG: price low touches or enters zone (low <= zone top)
+// Bear FVG: price high touches or enters zone (high >= zone btm)
+//------------------------------------------------------------
+void PurgeFilled(double barHigh, double barLow)
+{
+   int sz = ArraySize(g_fvgZones);
+   if(sz == 0) return;
+
+   for(int k = sz - 1; k >= 0; k--)
+   {
+      bool filled = g_fvgZones[k].isBull
+                    ? (barLow  <= g_fvgZones[k].top)   // bull gap: price entered from above
+                    : (barHigh >= g_fvgZones[k].btm);  // bear gap: price entered from below
+
+      if(filled)
+      {
+         ObjectDelete(0, g_fvgZones[k].boxName);
+         ObjectDelete(0, g_fvgZones[k].lineName);
+         for(int m = k; m < sz - 1; m++)
+            g_fvgZones[m] = g_fvgZones[m + 1];
+         ArrayResize(g_fvgZones, sz - 1);
+         sz--;
+      }
+   }
+}
+
+//------------------------------------------------------------
+// Re-pin all surviving FVG zones to FAR_FUTURE
+// Called after full recalc so right edge stays at chart edge
+//------------------------------------------------------------
+void RepinAllZones()
+{
+   if(!FVG_ExtendToRight) return;
+   int sz = ArraySize(g_fvgZones);
+   for(int k = 0; k < sz; k++)
+   {
+      StretchObjRight(g_fvgZones[k].boxName);
+      StretchObjRight(g_fvgZones[k].lineName);
+   }
+}
+
+//============================================================
+// OnInit
+//============================================================
+int OnInit()
+{
+   // FAR_FUTURE = current time + 10 years in seconds
+   FAR_FUTURE = TimeCurrent() + (datetime)(10 * 365 * 24 * 3600);
+
+   g_atr = iATR(_Symbol, _Period, 200);
+   if(g_atr == INVALID_HANDLE) { Print("ATR init failed"); return INIT_FAILED; }
+   ArraySetAsSeries(g_atrBuf, true);
+   ObjectsDeleteAll(0, g_prefix);
+   ArrayResize(g_fvgZones, 0);
+   g_cnt = 0;
+   return INIT_SUCCEEDED;
+}
+
+//============================================================
+// OnDeinit
+//============================================================
+void OnDeinit(const int reason)
+{
+   ObjectsDeleteAll(0, g_prefix);
+   IndicatorRelease(g_atr);
+}
+
+//============================================================
+// OnCalculate
+//============================================================
+int OnCalculate(const int       rates_total,
+                const int       prev_calculated,
+                const datetime &time[],
+                const double   &open[],
+                const double   &high[],
+                const double   &low[],
+                const double   &close[],
+                const long     &tick_volume[],
+                const long     &volume[],
+                const int      &spread[])
+{
+   if(rates_total < 4) return 0;
+   if(CopyBuffer(g_atr, 0, 0, rates_total, g_atrBuf) <= 0) return 0;
+
+   if(prev_calculated == 0)
+   {
+      ObjectsDeleteAll(0, g_prefix);
+      ArrayResize(g_fvgZones, 0);
+      g_cnt = 0;
+      // Refresh FAR_FUTURE on full recalc
+      FAR_FUTURE = TimeCurrent() + (datetime)(10 * 365 * 24 * 3600);
+   }
+
+   int start = (prev_calculated < 2) ? 2 : prev_calculated - 1;
+   if(start < 2) start = 2;
+
+   // Only closed candles — skip live bar
+   int limit = rates_total - 2;
+
+   if(start > limit)
+   {
+      // No new closed bar — just check live bar for real-time fill removal
+      PurgeFilled(high[rates_total - 1], low[rates_total - 1]);
+      ChartRedraw(0);
+      return rates_total;
+   }
+
+   long barSec = (long)PeriodSeconds(_Period);
+
+   for(int i = start; i <= limit; i++)
+   {
+      double O  = open[i],   H  = high[i],   L  = low[i],   C  = close[i];
+      double O1 = open[i-1], H1 = high[i-1], L1 = low[i-1], C1 = close[i-1];
+      double H2 = high[i-2], L2 = low[i-2];
+
+      datetime T  = time[i];
+      datetime T1 = time[i-1];
+      datetime T2 = time[i-2];
+
+      int    aIdx = rates_total - 1 - i;
+      double atrV = (aIdx >= 0 && aIdx < ArraySize(g_atrBuf)) ? g_atrBuf[aIdx] : 1.0;
+
+      // Check fills on each closed bar
+      PurgeFilled(H, L);
+
+      //------------------------------------------------------
+      // VOLUME IMBALANCES (VI)
+      //------------------------------------------------------
+      double vi_bt = MathMin(C,  O);
+      double vi_bb = MathMax(C1, O1);
+      bool bullVI = Show_VI
+         && O > C1 && H1 > L && C > C1 && O > O1 && H1 < vi_bt
+         && vi_bt > vi_bb
+         && WidthOK(VI_UseMinWidth, VI_Method, VI_MinWidth, vi_bt, vi_bb, atrV);
+      if(bullVI)
+         DotBox(T1, vi_bt, T + barSec * VI_Extend, vi_bb, Bull_VI_Color);
+
+      double vi_bt2 = MathMin(C1, O1);
+      double vi_bb2 = MathMax(C,  O);
+      bool bearVI = Show_VI
+         && O < C1 && L1 < H && C < C1 && O < O1 && L1 > vi_bb2
+         && vi_bt2 > vi_bb2
+         && WidthOK(VI_UseMinWidth, VI_Method, VI_MinWidth, vi_bt2, vi_bb2, atrV);
+      if(bearVI)
+         DotBox(T1, vi_bt2, T + barSec * VI_Extend, vi_bb2, Bear_VI_Color);
+
+      //------------------------------------------------------
+      // OPENING GAPS (OG)
+      //------------------------------------------------------
+      double og_bt = MathMin(C,  O);
+      double og_bb = MathMax(C1, O1);
+      bool bullOG = Show_OG && L > H1
+         && og_bt > og_bb
+         && WidthOK(OG_UseMinWidth, OG_Method, OG_MinWidth, og_bt, og_bb, atrV);
+      if(bullOG)
+      {
+         FillBox(T1, og_bt, T + barSec * OG_Extend, og_bb, Bull_OG_Color, 130);
+         OGLabel(T1, (og_bt + og_bb) * 0.5);
+      }
+
+      double og_bt2 = MathMin(C1, O1);
+      double og_bb2 = MathMax(C,  O);
+      bool bearOG = Show_OG && H < L1
+         && og_bt2 > og_bb2
+         && WidthOK(OG_UseMinWidth, OG_Method, OG_MinWidth, og_bt2, og_bb2, atrV);
+      if(bearOG)
+      {
+         FillBox(T1, og_bt2, T + barSec * OG_Extend, og_bb2, Bear_OG_Color, 130);
+         OGLabel(T1, (og_bt2 + og_bb2) * 0.5);
+      }
+
+      //------------------------------------------------------
+      // FAIR VALUE GAPS (FVG)
+      //------------------------------------------------------
+      double fvg_bt = L;
+      double fvg_bb = H2;
+      bool bullFVG = Show_FVG
+         && fvg_bt > fvg_bb && C1 > H2 && !bullOG
+         && WidthOK(FVG_UseMinWidth, FVG_Method, FVG_MinWidth, fvg_bt, fvg_bb, atrV);
+      if(bullFVG)
+      {
+         datetime te  = FVGRightTime(T, barSec);
+         string   bxN = FillBox(T2, fvg_bt, te, fvg_bb, Bull_FVG_Color, 200);
+         string   lnN = MidLine(T2, (fvg_bt + fvg_bb) * 0.5, te, Bull_FVG_Color);
+         RegisterFVG(bxN, lnN, fvg_bt, fvg_bb, true);
+      }
+
+      double fvg_bt2 = L2;
+      double fvg_bb2 = H;
+      bool bearFVG = Show_FVG
+         && fvg_bt2 > fvg_bb2 && C1 < L2 && !bearOG
+         && WidthOK(FVG_UseMinWidth, FVG_Method, FVG_MinWidth, fvg_bt2, fvg_bb2, atrV);
+      if(bearFVG)
+      {
+         datetime te  = FVGRightTime(T, barSec);
+         string   bxN = FillBox(T2, fvg_bt2, te, fvg_bb2, Bear_FVG_Color, 200);
+         string   lnN = MidLine(T2, (fvg_bt2 + fvg_bb2) * 0.5, te, Bear_FVG_Color);
+         RegisterFVG(bxN, lnN, fvg_bt2, fvg_bb2, false);
+      }
+   }
+
+   // Always check live bar for real-time fill removal on every tick
+   PurgeFilled(high[rates_total - 1], low[rates_total - 1]);
+
+   // Keep all surviving zones pinned to right edge
+   // RepinAllZones(); 
+
+   ChartRedraw(0);
+   return rates_total;
+}
+//+------------------------------------------------------------------+
