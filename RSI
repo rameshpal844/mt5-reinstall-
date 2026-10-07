@@ -1,0 +1,388 @@
+//================================================================
+//  RSI TradingView Style — v25 (Mouse Drag Scaling)
+//  - Drag Right Edge (Up/Down) to Zoom (Stretch/Squish)
+//  - Drag Center (Up/Down) to Pan (Shift)
+//  - 'R' Button to Reset to 0-100
+//  - OPTIMIZED EDITION: Fixed CPU Overload Loop
+//================================================================
+#property indicator_separate_window
+#property indicator_buffers 6
+#property indicator_plots   4
+#property indicator_label1  "RSI"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  0x7E57C2
+#property indicator_width1  2
+#property indicator_label2  "MA"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrYellow
+#property indicator_width2  1
+#property indicator_label3  "OB Fill"
+#property indicator_type3   DRAW_FILLING
+#property indicator_color3  0x1A6B1A,0x003200
+#property indicator_label4  "OS Fill"
+#property indicator_type4   DRAW_FILLING
+#property indicator_color4  0x6B1A1A,0x320000
+
+//--- Inputs
+input int                RSI_Period = 14;
+input ENUM_APPLIED_PRICE RSI_Price  = PRICE_CLOSE;
+input int                MA_Period  = 14;
+input color              MA_Color   = clrYellow;
+input color              RSI_Color  = 0x7E57C2;
+input int                OB_Level   = 70;
+input int                OS_Level   = 30;
+input color              OB_Fill    = 0x1A6B1A;
+input color              OS_Fill    = 0x6B1A1A;
+input int                Panel_H    = 130;
+
+//--- Buffers
+double B_RSI[], B_MA[], B_OBa[], B_OBb[], B_OSa[], B_OSb[];
+
+//--- State Variables
+bool   g_on       = false;
+int    g_bx       = 8;
+int    g_by       = 8;
+int    g_win      = -1;
+bool   g_ready    = false;
+int    g_rsi      = INVALID_HANDLE;
+double g_zMin     = 0;
+double g_zMax     = 100;
+string g_sn       = "RSI25";
+string g_file;
+
+//--- Mouse Drag State
+int    g_mouse_y_prev = -1;
+bool   g_drag_scale   = false;
+bool   g_drag_pan     = false;
+
+//--- Object names
+#define BTN    "R25_btn"
+#define BRESET "R25_reset"
+#define LOB    "R25_ob"
+#define LMID   "R25_mid"
+#define LOS    "R25_os"
+
+//================================================================
+int OnInit()
+{
+   g_win   = -1;
+   g_ready = false;
+   IndicatorSetString(INDICATOR_SHORTNAME, g_sn);
+   g_file = "RSI25_" + _Symbol + ".dat";
+
+   SetIndexBuffer(0, B_RSI,  INDICATOR_DATA);
+   SetIndexBuffer(1, B_MA,   INDICATOR_DATA);
+   SetIndexBuffer(2, B_OBa,  INDICATOR_DATA);
+   SetIndexBuffer(3, B_OBb,  INDICATOR_DATA);
+   SetIndexBuffer(4, B_OSa,  INDICATOR_DATA);
+   SetIndexBuffer(5, B_OSb,  INDICATOR_DATA);
+
+   PlotIndexSetInteger(0, PLOT_LINE_COLOR, RSI_Color);
+   PlotIndexSetInteger(0, PLOT_LINE_WIDTH, 2);
+   PlotIndexSetInteger(1, PLOT_LINE_COLOR, MA_Color);
+   PlotIndexSetInteger(2, PLOT_LINE_COLOR, OB_Fill);
+   PlotIndexSetInteger(3, PLOT_LINE_COLOR, OS_Fill);
+   for(int i=0;i<6;i++) PlotIndexSetDouble(i, PLOT_EMPTY_VALUE, 0);
+
+   if(g_rsi != INVALID_HANDLE) IndicatorRelease(g_rsi);
+   g_rsi = iRSI(_Symbol, _Period, RSI_Period, RSI_Price);
+   if(g_rsi == INVALID_HANDLE) return INIT_FAILED;
+
+   IndicatorSetDouble(INDICATOR_MINIMUM, g_zMin);
+   IndicatorSetDouble(INDICATOR_MAXIMUM, g_zMax);
+
+   // Enable Mouse Move Tracking for Drag functionality
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
+
+   LoadState();
+   SetPlots(g_on);
+   MakeBtn();
+   EventSetMillisecondTimer(200);
+   return INIT_SUCCEEDED;
+}
+
+//================================================================
+int OnCalculate(const int total, const int prev,
+                const datetime &t[], const double &o[],
+                const double &h[], const double &l[], const double &c[],
+                const long &tv[], const long &v[], const int &s[])
+{
+   if(total < RSI_Period + 2) return 0;
+
+   // --- OPTIMIZATION: Only process new bars instead of the whole chart ---
+   int start = prev - 1;
+   if(start < RSI_Period) start = RSI_Period;
+
+   // Calculate how much history we actually need to pull
+   int copy_count = (total - start) + MA_Period;
+   if(copy_count > total) copy_count = total;
+
+   double raw[]; 
+   ArraySetAsSeries(raw, true); 
+   if(CopyBuffer(g_rsi, 0, 0, copy_count, raw) <= 0) return prev;
+
+   double ma[]; 
+   ArraySetAsSeries(ma, true); 
+   ArrayResize(ma, copy_count); 
+   ArrayInitialize(ma, 0);
+
+   if(MA_Period > 1) {
+      // Loop only through the new bars for the Moving Average
+      for(int i = 0; i < copy_count - MA_Period; i++) { 
+         double s2 = 0; 
+         for(int j = 0; j < MA_Period; j++) s2 += raw[i+j]; 
+         ma[i] = s2 / MA_Period; 
+      }
+   } else {
+      ArrayCopy(ma, raw);
+   }
+
+   for(int i = start; i < total; i++)
+   {
+      int k = total - 1 - i;
+      if(k >= copy_count) continue; // Safety check
+
+      double rv = raw[k], mv = ma[k];
+      if(rv <= 0 || rv > 100) { 
+         B_RSI[i]=0; B_MA[i]=0; B_OBa[i]=OB_Level; B_OBb[i]=OB_Level; B_OSa[i]=OS_Level; B_OSb[i]=OS_Level; 
+         continue;
+      }
+      B_RSI[i]=rv; B_MA[i]=(mv>0?mv:0);
+      B_OBa[i]=(rv>OB_Level?rv:OB_Level); B_OBb[i]=OB_Level;
+      B_OSa[i]=OS_Level; B_OSb[i]=(rv<OS_Level?rv:OS_Level);
+   }
+   
+   if(g_on && g_win>0) DrawLines();
+   return total;
+}
+
+//================================================================
+void OnTimer()
+{
+   if(g_ready) return;
+   if(g_win<=0) g_win = ChartWindowFind(0,g_sn);
+   if(g_win>0)
+   {
+      SetHeight(g_on ? Panel_H : 1);
+      if(g_on){ DrawLines(); MkZBtn(BRESET,"R",4,C'90,70,20'); }
+      ChartRedraw();
+      g_ready=true;
+      EventKillTimer();
+   }
+}
+
+//================================================================
+void OnChartEvent(const int id, const long &lp, const double &dp, const string &sp)
+{
+   // Handle Button Clicks
+   if(id==CHARTEVENT_OBJECT_CLICK)
+   {
+      if(sp==BTN)    { ObjectSetInteger(0,BTN,OBJPROP_STATE,false);    Toggle(); return; }
+      if(sp==BRESET) { ObjectSetInteger(0,BRESET,OBJPROP_STATE,false); ZoomReset(); return; }
+   }
+   
+   // Handle Button Dragging
+   if(id==CHARTEVENT_OBJECT_DRAG && sp==BTN)
+   { g_bx=(int)ObjectGetInteger(0,BTN,OBJPROP_XDISTANCE); g_by=(int)ObjectGetInteger(0,BTN,OBJPROP_YDISTANCE); SaveState(); return; }
+
+   // Handle Mouse Dragging for Zoom/Pan
+   if(id==CHARTEVENT_MOUSE_MOVE)
+   {
+      int x = (int)lp;
+      int y = (int)dp;
+      bool mb = ((int)StringToInteger(sp) & 1) == 1; // Left mouse button down
+
+      int window = 0;
+      datetime time;
+      double price;
+      
+      if(ChartXYToTimePrice(0, x, y, window, time, price))
+      {
+         if(window == g_win && g_on)
+         {
+            long chart_width = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, window);
+            
+            if(mb) // If clicking and holding
+            {
+               if(!g_drag_scale && !g_drag_pan) // Just started drag
+               {
+                  g_mouse_y_prev = y;
+                  // If clicking within the last 60 pixels on the right, it's a Scale (Zoom) action
+                  if(x >= chart_width - 60) g_drag_scale = true;
+                  else g_drag_pan = true; // Otherwise, Pan (Shift) action
+               }
+               else // Currently dragging
+               {
+                  int dy = y - g_mouse_y_prev;
+                  if(dy != 0)
+                  {
+                     double range = g_zMax - g_zMin;
+                     
+                     if(g_drag_scale)
+                     {
+                        // Stretches/Squishes based on vertical mouse movement
+                        double factor = MathExp(dy * 0.015); // Smooth scaling
+                        double mid = (g_zMax + g_zMin) / 2.0;
+                        double new_range = range * factor;
+                        
+                        // Limit scale to prevent infinite zoom or flipping
+                        new_range = MathMax(5.0, MathMin(new_range, 500.0));
+                        g_zMin = mid - (new_range / 2.0);
+                        g_zMax = mid + (new_range / 2.0);
+                     }
+                     else if(g_drag_pan)
+                     {
+                        // Pans up/down
+                        double shift = range * ((double)dy / (double)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, window));
+                        g_zMin += shift;
+                        g_zMax += shift;
+                     }
+                     
+                     IndicatorSetDouble(INDICATOR_MINIMUM, g_zMin);
+                     IndicatorSetDouble(INDICATOR_MAXIMUM, g_zMax);
+                     ChartRedraw();
+                     g_mouse_y_prev = y; // Update previous position
+                  }
+               }
+            }
+            else // Mouse released
+            {
+               g_drag_scale = false;
+               g_drag_pan = false;
+            }
+         }
+         else // Mouse left the indicator window
+         {
+            g_drag_scale = false;
+            g_drag_pan = false;
+         }
+      }
+   }
+
+   if(id==CHARTEVENT_CHART_CHANGE)
+   { if(g_win<=0) g_win=ChartWindowFind(0,g_sn); if(g_on&&g_win>0) DrawLines(); }
+}
+
+//================================================================
+void Toggle()
+{
+   g_on=!g_on;
+   if(g_win<=0) g_win=ChartWindowFind(0,g_sn);
+   SetPlots(g_on);
+   if(g_on){ SetHeight(Panel_H); DrawLines(); MkZBtn(BRESET,"R",4,C'90,70,20'); }
+   else    { KillLines(); ObjectDelete(0,BRESET); SetHeight(1); }
+   UpdBtn();
+   SaveState();
+   ChartRedraw();
+}
+
+void SetPlots(bool show)
+{
+   PlotIndexSetInteger(0,PLOT_DRAW_TYPE, show?DRAW_LINE:DRAW_NONE);
+   PlotIndexSetInteger(1,PLOT_DRAW_TYPE, show?DRAW_LINE:DRAW_NONE);
+   PlotIndexSetInteger(2,PLOT_DRAW_TYPE, show?DRAW_FILLING:DRAW_NONE);
+   PlotIndexSetInteger(3,PLOT_DRAW_TYPE, show?DRAW_FILLING:DRAW_NONE);
+}
+
+void SetHeight(int px)
+{ if(g_win>0) ChartSetInteger(0,CHART_HEIGHT_IN_PIXELS,g_win,px); }
+
+//================================================================
+void MakeBtn()
+{
+   ObjectDelete(0,BTN);
+   ObjectCreate(0,BTN,OBJ_BUTTON,0,0,0);
+   ObjectSetInteger(0,BTN,OBJPROP_CORNER,    CORNER_LEFT_LOWER);
+   ObjectSetInteger(0,BTN,OBJPROP_XDISTANCE, g_bx);
+   ObjectSetInteger(0,BTN,OBJPROP_YDISTANCE, g_by);
+   ObjectSetInteger(0,BTN,OBJPROP_XSIZE,     50);
+   ObjectSetInteger(0,BTN,OBJPROP_YSIZE,     22);
+   ObjectSetString (0,BTN,OBJPROP_FONT,      "Arial Bold");
+   ObjectSetInteger(0,BTN,OBJPROP_FONTSIZE,  9);
+   ObjectSetInteger(0,BTN,OBJPROP_COLOR,     clrWhite);
+   ObjectSetInteger(0,BTN,OBJPROP_SELECTABLE,true);
+   ObjectSetInteger(0,BTN,OBJPROP_HIDDEN,    false);
+   ObjectSetInteger(0,BTN,OBJPROP_ZORDER,    100);
+   UpdBtn();
+}
+
+void UpdBtn()
+{
+   if(g_on)
+   { ObjectSetString(0,BTN,OBJPROP_TEXT,"RSI v"); ObjectSetInteger(0,BTN,OBJPROP_BGCOLOR,C'20,150,60'); }
+   else
+   { ObjectSetString(0,BTN,OBJPROP_TEXT,"RSI >"); ObjectSetInteger(0,BTN,OBJPROP_BGCOLOR,C'160,50,50'); }
+}
+
+void MkZBtn(string nm, string txt, int y, color bg)
+{
+   ObjectDelete(0,nm);
+   ObjectCreate(0,nm,OBJ_BUTTON,g_win,0,0);
+   ObjectSetInteger(0,nm,OBJPROP_CORNER,    CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,nm,OBJPROP_XDISTANCE, 58);
+   ObjectSetInteger(0,nm,OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0,nm,OBJPROP_XSIZE,     24);
+   ObjectSetInteger(0,nm,OBJPROP_YSIZE,     22);
+   ObjectSetString (0,nm,OBJPROP_TEXT,      txt);
+   ObjectSetString (0,nm,OBJPROP_FONT,      "Arial Bold");
+   ObjectSetInteger(0,nm,OBJPROP_FONTSIZE,  11);
+   ObjectSetInteger(0,nm,OBJPROP_COLOR,     clrWhite);
+   ObjectSetInteger(0,nm,OBJPROP_BGCOLOR,   bg);
+   ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,nm,OBJPROP_HIDDEN,    false);
+   ObjectSetInteger(0,nm,OBJPROP_ZORDER,    100);
+}
+
+void ZoomReset()
+{ 
+   g_zMin=0; g_zMax=100; 
+   IndicatorSetDouble(INDICATOR_MINIMUM,0); 
+   IndicatorSetDouble(INDICATOR_MAXIMUM,100); 
+   ChartRedraw(); 
+}
+
+//================================================================
+void MkL(string nm, double val, color clr, int sty)
+{
+   if(ObjectFind(0,nm)<0) ObjectCreate(0,nm,OBJ_HLINE,g_win,0,val);
+   ObjectSetDouble (0,nm,OBJPROP_PRICE,val);
+   ObjectSetInteger(0,nm,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,nm,OBJPROP_STYLE,sty);
+   ObjectSetInteger(0,nm,OBJPROP_WIDTH,1);
+   ObjectSetInteger(0,nm,OBJPROP_BACK,true);
+   ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,false);
+}
+void DrawLines(){ if(g_win<=0)return; MkL(LOB,OB_Level,C'160,60,60',STYLE_SOLID); MkL(LMID,(OB_Level+OS_Level)/2,C'90,90,90',STYLE_DOT); MkL(LOS,OS_Level,C'60,160,60',STYLE_SOLID); }
+void KillLines(){ ObjectDelete(0,LOB); ObjectDelete(0,LMID); ObjectDelete(0,LOS); }
+
+//================================================================
+void SaveState()
+{
+   int h=FileOpen(g_file,FILE_WRITE|FILE_TXT|FILE_COMMON);
+   if(h!=INVALID_HANDLE){ FileWriteString(h,(g_on?"1":"0")+","+IntegerToString(g_bx)+","+IntegerToString(g_by)); FileClose(h); }
+}
+void LoadState()
+{
+   g_on=false; g_bx=8; g_by=8;
+   if(!FileIsExist(g_file,FILE_COMMON)) return;
+   int h=FileOpen(g_file,FILE_READ|FILE_TXT|FILE_COMMON);
+   if(h!=INVALID_HANDLE)
+   {
+      string s=FileReadString(h); FileClose(h);
+      string p[]; 
+      if(StringSplit(s,',',p)>=3){ g_on=(p[0]=="1"); g_bx=(int)StringToInteger(p[1]); g_by=(int)StringToInteger(p[2]); }
+      else g_on=(s=="1");
+   }
+}
+
+//================================================================
+void OnDeinit(const int reason)
+{
+   ObjectDelete(0,BTN);
+   ObjectDelete(0,BRESET);
+   KillLines();
+   EventKillTimer();
+   if(g_rsi!=INVALID_HANDLE) IndicatorRelease(g_rsi);
+   ChartRedraw();
+}
+//================================================================
