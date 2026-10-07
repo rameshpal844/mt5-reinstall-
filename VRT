@@ -1,0 +1,1768 @@
+//+------------------------------------------------------------------+
+//|  Visual Risk Trade Manager (Interactive EA)                      |
+//|  Perfect Native HLINE Partial TPs + Strict Layout Preservation   |
+//|  *OPTIMIZED EDITION: Smart Up/Down Menus + Flush Zones*          |
+//+------------------------------------------------------------------+
+
+#property version "1.00"
+
+#include <Trade\Trade.mqh>
+CTrade trade;
+
+// ── UI STYLE & THEME ENUMS ──
+enum ENUM_PANEL_MODE { PANEL_1_CLASSIC=0, PANEL_2_GEAR=1 };
+enum ENUM_THEME { THEME_LIGHT=0, THEME_DARK=1 };
+
+input group "=== UI Style Settings ==="
+input ENUM_PANEL_MODE PanelStyle      = PANEL_2_GEAR; // UI Panel Style
+input ENUM_THEME ChartTheme           = THEME_LIGHT;  // Chart Theme
+
+// ── DRAGGABLE PARTIAL TP SYSTEM ──
+input group "=== Partial Take Profit System ==="
+input double Partial_TP1_Pct      = 25.0;  // TP1 Close %
+input double Partial_TP2_Pct      = 25.0;  // TP2 Close %
+input double Partial_TP3_Pct      = 25.0;  // TP3 Close %
+input double Partial_TP4_Pct      = 25.0;  // TP4 Close %
+input bool   Move_BE_After_TP1    = false; // Move SL to Entry after TP1 hits?
+
+// ── RISK:REWARD TARGETS ──
+input group "=== Risk:Reward Shortcuts ==="
+input double RR_Target_1          = 1.0;   // 1st Target Multiplier (e.g., 1 = 1:1)
+input double RR_Target_2          = 2.0;   // 2nd Target Multiplier (e.g., 2 = 1:2)
+input double RR_Target_3          = 3.0;   // 3rd Target Multiplier (e.g., 3 = 1:3)
+input double RR_Target_Custom     = 4.0;   // Custom Target Multiplier (e.g., 4.0 or 1.5)
+
+// ── ORIGINAL INPUTS ──
+input group "=== Original Layout Settings ==="
+input bool   ShowCandleTimer      = true;  // Show Candle Timer
+input color  Color_Buy            = C'41,98,255';
+input color  Color_Sell           = C'200,60,60';
+input color  Color_TP             = C'8,153,129';
+input color  Color_SL             = clrRed;
+input color  Color_Profit         = C'38,166,91';
+input color  Color_Loss           = clrRed;
+input color  Label_BG             = clrWhite;
+input color  Label_DimText        = C'160,160,160';
+input color  Sep_Color            = C'200,200,200';
+input int    Label_Width          = 150;   // Updated Default
+input int    Label_Height         = 26;
+input int    Border_Thickness     = 2;
+input int    Label_FromRight      = 200;   // Updated Default
+
+input string FontFace             = "Segoe UI";
+input int    FontSize             = 10;
+input bool   Font_Bold            = false;
+input bool   ShowLotSize          = true;
+
+input int    Entry_LineWidth      = 2;
+input bool   Entry_Dashed         = true;
+input bool   Entry_Solid_Fill     = false;
+input color  Entry_BG_Color       = clrYellow; 
+
+input int    TP_LineWidth         = 2;
+input bool   TP_Dashed            = true;
+input int    SL_LineWidth         = 2;
+input bool   SL_Dashed            = true;
+input bool   ShowRR               = true;
+
+input bool   ShowZones            = true;
+input color  Zone_Reward          = C'235,248,235';
+input color  Zone_Reward_Progress = C'180,230,180';
+input color  Zone_Risk            = C'255,235,235';
+input color  Zone_Risk_Progress   = C'255,182,193';
+input color  Zone_Text_Color      = C'120,120,120';
+
+// ── ZONE TEXT ──
+enum ENUM_ZONE_TEXT_MODE { ZONE_INSIDE=0, SUB_LABEL=1 };
+input ENUM_ZONE_TEXT_MODE ZoneText_Mode = ZONE_INSIDE;
+input bool   ShowZoneText         = true; 
+
+input string Sound_Order_Filled   = "order filled.wav";
+input string Sound_TP_Hit         = "take profit hit.wav";
+input string Sound_SL_Hit         = "stop loss hit.wav";
+
+//──────────────────────────────────────────────────────────────────
+//  INTERNAL COLOR REGISTER & DYNAMIC SCALING
+//──────────────────────────────────────────────────────────────────
+color c_Zone_Reward, c_Zone_Reward_Progress, c_Zone_Risk, c_Zone_Risk_Progress, c_Zone_Text_Color;
+color c_Menu_BG, c_Menu_TC, c_BE_Inact_BG, c_BE_Inact_TC, c_Pct_BG;
+color c_Gear_BG, c_Gear_TC;
+
+extern bool g_needs_redraw; 
+
+double g_ui_scale = 1.0;
+int g_dyn_W = 150;
+int g_dyn_H = 26;
+int g_dyn_Font = 10;
+
+void UpdateScale() {
+   int cw = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   if (cw < 750) {
+      g_ui_scale = (double)cw / 750.0;
+      if (g_ui_scale < 0.85) g_ui_scale = 0.85; 
+   } else {
+      g_ui_scale = 1.0;
+   }
+   
+   g_dyn_W = (int)MathRound(Label_Width * g_ui_scale);
+   g_dyn_H = (int)MathRound(Label_Height * g_ui_scale);
+   g_dyn_Font = (int)MathRound(FontSize * g_ui_scale);
+   if(g_dyn_Font < 8) g_dyn_Font = 8;
+}
+
+void ApplyTheme() 
+{
+   if(ChartTheme == THEME_DARK) {
+      c_Zone_Reward          = C'18,48,36';
+      c_Zone_Reward_Progress = C'25,85,60';
+      c_Zone_Risk            = C'60,20,20';
+      c_Zone_Risk_Progress   = C'100,30,30';
+      c_Zone_Text_Color      = C'150,155,170';
+      c_Menu_BG              = C'42,46,57';
+      c_Menu_TC              = C'178,181,190';
+      c_BE_Inact_BG          = C'42,46,57';
+      c_BE_Inact_TC          = C'100,105,115';
+      c_Pct_BG               = C'25,30,40';
+      c_Gear_BG              = C'100,105,110'; 
+      c_Gear_TC              = clrBlack;       
+
+      if((color)ChartGetInteger(0, CHART_COLOR_BACKGROUND) != clrBlack) {
+         ChartSetInteger(0, CHART_COLOR_BACKGROUND, clrBlack);
+         ChartSetInteger(0, CHART_COLOR_FOREGROUND, clrWhite);
+         ChartSetInteger(0, CHART_COLOR_GRID, C'40,40,40');
+         g_needs_redraw = true;
+      }
+   } else { 
+      c_Zone_Reward          = Zone_Reward;
+      c_Zone_Reward_Progress = Zone_Reward_Progress;
+      c_Zone_Risk            = Zone_Risk;
+      c_Zone_Risk_Progress   = Zone_Risk_Progress;
+      c_Zone_Text_Color      = Zone_Text_Color;
+      c_Menu_BG              = C'228,230,235'; 
+      c_Menu_TC              = C'90,95,105';   
+      c_BE_Inact_BG          = C'228,230,235'; 
+      c_BE_Inact_TC          = C'160,165,175'; 
+      c_Pct_BG               = C'65,70,80';    
+      c_Gear_BG              = C'200,205,210'; 
+      c_Gear_TC              = clrBlack;       
+      
+      if((color)ChartGetInteger(0, CHART_COLOR_BACKGROUND) != clrWhite) {
+         ChartSetInteger(0, CHART_COLOR_BACKGROUND, clrWhite);
+         ChartSetInteger(0, CHART_COLOR_FOREGROUND, clrBlack);
+         ChartSetInteger(0, CHART_COLOR_GRID, C'200,200,200');
+         g_needs_redraw = true;
+      }
+   }
+}
+
+//──────────────────────────────────────────────────────────────────
+string PREFIX = "VRT_"; 
+
+struct LabelRect { int left; int right; int top; int bottom; };
+LabelRect g_layout_rects[]; 
+LabelRect g_click_rects[];  
+
+void AddClickRect(int l, int r, int t, int b) {
+   int sz = ArraySize(g_click_rects);
+   ArrayResize(g_click_rects, sz+1);
+   g_click_rects[sz].left = l;
+   g_click_rects[sz].right = r;
+   g_click_rects[sz].top = t;
+   g_click_rects[sz].bottom = b;
+}
+
+string g_drawn_tickets[];
+ulong  g_active_menu_ticket    = 0;
+ulong  g_active_rr_ticket      = 0;
+ulong  g_active_partial_ticket = 0;
+int    g_force_redraw_ticks    = 0;
+
+// Dragging globals
+bool   g_ptp_dragging = false;
+ulong  g_ptp_drag_tkt = 0;
+int    g_ptp_drag_idx = -1;
+double g_ptp_drag_offset = 0;
+
+struct PPP_CACHE {
+   ulong ticket; 
+   double volume; 
+   double initial_volume;
+   double sl_price; 
+   double sl_money; 
+   double tp_price; 
+   double tp_money;
+   bool   ptp_active[4];
+   bool   ptp_hit[4];
+   double ptp_price[4];
+};
+PPP_CACHE g_ppp_cache[];
+
+int GetCacheIdx(ulong tkt) {
+   for(int i = 0; i < ArraySize(g_ppp_cache); i++) {
+      if(g_ppp_cache[i].ticket == tkt) return i;
+   }
+   return -1;
+}
+
+int  g_cache_cleanup_tick = 0;
+bool g_needs_redraw       = false;
+
+int    g_last_cw   = 0;
+double g_last_pMax = 0;
+double g_last_pMin = 0;
+
+uint g_last_chart_change_tick = 0;
+#define CHART_CHANGE_DEBOUNCE_MS 0
+
+struct PosData { ulong tkt; datetime tm; };
+
+//──────────────────────────────────────────────────────────────────
+void SafeDelete(const string name) {
+   if(ObjectFind(0, name) >= 0) { ObjectDelete(0, name); g_needs_redraw = true; }
+}
+
+void DeleteAll() { 
+   if(ObjectsDeleteAll(0, PREFIX) > 0) g_needs_redraw = true; 
+}
+
+string FontStr() { return FontFace + (Font_Bold ? " Bold" : ""); }
+
+//──────────────────────────────────────────────────────────────────
+void UpdateCandleTimer()
+{
+   if(!ShowCandleTimer) { SafeDelete(PREFIX+"TIMER"); return; }
+   UpdateScale(); 
+   
+   datetime tOpen = iTime(_Symbol, _Period, 0);
+   int remaining = (int)(tOpen + PeriodSeconds(_Period) - TimeCurrent());
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   string txt = "";
+   if(remaining < 0) txt = "0:00(-)"; 
+   else {
+      int h = remaining / 3600;
+      int m = (remaining % 3600) / 60;
+      int s = remaining % 60;
+      
+      if(h > 0) txt = IntegerToString(h) + ":" + (m < 10 ? "0" : "") + IntegerToString(m) + ":" + (s < 10 ? "0" : "") + IntegerToString(s);
+      else txt = IntegerToString(m) + ":" + (s < 10 ? "0" : "") + IntegerToString(s);
+   }
+
+   string name = PREFIX+"TIMER";
+   if(ObjectFind(0, name) < 0) {
+      ObjectCreate(0, name, OBJ_TEXT, 0, 0, 0);
+      ObjectSetString(0, name, OBJPROP_FONT, FontFace + " Bold");
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 100);
+   }
+   
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, g_dyn_Font);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_TIME, 0, tOpen);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, 0, current_price);
+   
+   ObjectSetString(0, name, OBJPROP_TEXT, "   " + txt);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, (remaining <= 10 ? clrRed : (ChartTheme == THEME_DARK ? clrWhite : clrBlack)));
+}
+
+//──────────────────────────────────────────────────────────────────
+void SetZone(const string id, datetime t1, datetime t2, double p1, double p2, color bgCol)
+{
+   if(!ShowZones || MathAbs(p1 - p2) <= 0.000001) { SafeDelete(PREFIX+"ZN_"+id); return; } 
+   string n = PREFIX+"ZN_"+id;
+   
+   if(ObjectCreate(0,n,OBJ_RECTANGLE,0,0,0,0,0)) {
+      ObjectSetInteger(0,n,OBJPROP_BACK,true);
+      ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,n,OBJPROP_FILL,true);
+      ObjectSetString(0,n,OBJPROP_TOOLTIP,"\n");
+   }
+   
+   ObjectSetInteger(0,n,OBJPROP_TIME,0,t1);
+   ObjectSetInteger(0,n,OBJPROP_TIME,1,t2);
+   ObjectSetDouble(0,n,OBJPROP_PRICE,0,p1);
+   ObjectSetDouble(0,n,OBJPROP_PRICE,1,p2);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,bgCol);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,0);
+}
+
+void SetChartText(const string id, datetime t, double p, string txt, color col, ENUM_ANCHOR_POINT anchor, int zBase)
+{
+   if(!ShowZones || !ShowZoneText) { SafeDelete(PREFIX+"ZTX_"+id); return; }
+   string n = PREFIX+"ZTX_"+id;
+   
+   if(ObjectCreate(0,n,OBJ_TEXT,0,t,p)) {
+      ObjectSetInteger(0,n,OBJPROP_BACK,false);
+      ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+      ObjectSetString(0,n,OBJPROP_TOOLTIP,"\n");
+   }
+   
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,anchor);
+   ObjectSetInteger(0,n,OBJPROP_TIME,0,t);
+   ObjectSetDouble(0,n,OBJPROP_PRICE,0,p);
+   ObjectSetString(0,n,OBJPROP_TEXT,txt);
+   ObjectSetString(0,n,OBJPROP_FONT,FontStr());
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,g_dyn_Font);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,col);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,zBase+4);
+}
+
+void SetLine(const string id, datetime t1, datetime t2, double price, color col, int width, bool dashed)
+{
+   string n = PREFIX+"LN_"+id;
+   if(ObjectCreate(0,n,OBJ_TREND,0,t1,price,t2,price)) {
+      ObjectSetInteger(0,n,OBJPROP_RAY_RIGHT,false);
+      ObjectSetInteger(0,n,OBJPROP_RAY_LEFT,false);
+      ObjectSetInteger(0,n,OBJPROP_BACK,false);
+      ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+      ObjectSetString(0,n,OBJPROP_TOOLTIP,"\n");
+      bool drag=(StringGetCharacter(id,0)=='T'||StringGetCharacter(id,0)=='S');
+      ObjectSetInteger(0,n,OBJPROP_SELECTABLE,drag);
+      ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
+   }
+   
+   if(!ObjectGetInteger(0, n, OBJPROP_SELECTED)) {
+      ObjectSetInteger(0,n,OBJPROP_TIME,0,t1);
+      ObjectSetInteger(0,n,OBJPROP_TIME,1,t2);
+      ObjectSetDouble(0,n,OBJPROP_PRICE,0,price);
+      ObjectSetDouble(0,n,OBJPROP_PRICE,1,price);
+   } else {
+      double p0 = ObjectGetDouble(0,n,OBJPROP_PRICE,0);
+      ObjectSetDouble(0,n,OBJPROP_PRICE,1,p0); 
+   }
+   
+   ObjectSetInteger(0,n,OBJPROP_COLOR,col); 
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,width); 
+   ObjectSetInteger(0,n,OBJPROP_STYLE,dashed?STYLE_DASH:STYLE_SOLID);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,3);
+}
+
+void SetRect(const string name, int x, int y, int w, int h, color fill, color border, int t, int zBase)
+{
+   string o=name+"_OUT", i=name+"_IN";
+   if(ObjectCreate(0,o,OBJ_RECTANGLE_LABEL,0,0,0)){
+      ObjectSetInteger(0,o,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,o,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(0,o,OBJPROP_BACK,false);
+      ObjectSetInteger(0,o,OBJPROP_SELECTABLE,false);
+      ObjectSetString(0,o,OBJPROP_TOOLTIP,"\n");
+   }
+   ObjectSetInteger(0,o,OBJPROP_XDISTANCE,x); ObjectSetInteger(0,o,OBJPROP_YDISTANCE,y); 
+   ObjectSetInteger(0,o,OBJPROP_XSIZE,w); ObjectSetInteger(0,o,OBJPROP_YSIZE,h); 
+   ObjectSetInteger(0,o,OBJPROP_BGCOLOR,border); ObjectSetInteger(0,o,OBJPROP_COLOR,border);
+   ObjectSetInteger(0,o,OBJPROP_ZORDER,zBase);
+   
+   if(ObjectCreate(0,i,OBJ_RECTANGLE_LABEL,0,0,0)){
+      ObjectSetInteger(0,i,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,i,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(0,i,OBJPROP_BACK,false);
+      ObjectSetInteger(0,i,OBJPROP_SELECTABLE,false);
+      ObjectSetString(0,i,OBJPROP_TOOLTIP,"\n");
+   }
+   ObjectSetInteger(0,i,OBJPROP_XDISTANCE,x+t); ObjectSetInteger(0,i,OBJPROP_YDISTANCE,y+t); 
+   ObjectSetInteger(0,i,OBJPROP_XSIZE,w-t*2); ObjectSetInteger(0,i,OBJPROP_YSIZE,h-t*2); 
+   ObjectSetInteger(0,i,OBJPROP_BGCOLOR,fill);  ObjectSetInteger(0,i,OBJPROP_COLOR,fill);
+   ObjectSetInteger(0,i,OBJPROP_ZORDER,zBase+1);
+}
+
+void SetText(const string name, int x, int y, string txt, color col, int fs, int zBase)
+{
+   if(ObjectCreate(0,name,OBJ_LABEL,0,0,0)){
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetString(0,name,OBJPROP_TOOLTIP,"\n");
+   }
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x); 
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,fs<0?g_dyn_Font:fs);
+   ObjectSetString(0,name,OBJPROP_FONT,FontStr());
+   ObjectSetInteger(0,name,OBJPROP_COLOR,col);
+   ObjectSetString(0,name,OBJPROP_TEXT,txt);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,zBase+2);
+}
+
+void SetBtn(const string name, int x, int y, int w, int h, string text, color bg, color tc, string tip, int zBase, bool isGear=false)
+{
+   if(ObjectCreate(0,name,OBJ_BUTTON,0,0,0)){
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_STATE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   }
+   ObjectSetString(0,name,OBJPROP_TEXT,text); 
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,bg); 
+   ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,bg); 
+   ObjectSetInteger(0,name,OBJPROP_COLOR,tc);
+   
+   int btnFont = g_dyn_Font - 1;
+   if (btnFont < 7) btnFont = 7;
+   
+   if(isGear) {
+       ObjectSetInteger(0,name,OBJPROP_FONTSIZE, btnFont + 5); 
+       ObjectSetString(0,name,OBJPROP_FONT, "Segoe UI Symbol"); 
+   } else {
+       ObjectSetInteger(0,name,OBJPROP_FONTSIZE, btnFont); 
+       ObjectSetString(0,name,OBJPROP_FONT,FontStr());
+   }
+   
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x); 
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y); 
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,w); 
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,h);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,tip!=""?tip:"\n");
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,zBase+5);
+}
+
+double CalculatePartialProfit(ulong tkt, int c_idx, double price, double pct) {
+   if(c_idx < 0 || !PositionSelectByTicket(tkt)) return 0.0;
+   
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   long type = PositionGetInteger(POSITION_TYPE);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0) step = 0.01;
+   
+   double init_vol = g_ppp_cache[c_idx].initial_volume;
+   if(init_vol <= 0) init_vol = PositionGetDouble(POSITION_VOLUME);
+   
+   double exact_vol = init_vol * (pct / 100.0);
+   if(exact_vol <= 0) return 0.0;
+   
+   double profit = 0.0;
+   ENUM_ORDER_TYPE ot = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   
+   if(OrderCalcProfit(ot, _Symbol, exact_vol, entry, price, profit)) {
+       return profit;
+   } else {
+       double tick_val = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+       double tick_sz = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+       if(tick_sz > 0) {
+          double dist = (type == POSITION_TYPE_BUY) ? (price - entry) : (entry - price);
+          profit = (dist / tick_sz) * exact_vol * tick_val;
+       }
+   }
+   return profit;
+}
+
+void UpdatePTP_Labels(int pt_idx, const string sfx, double price, double pct, bool hit)
+{
+   int px, py;
+   if(!ChartTimePriceToXY(0, 0, iTime(_Symbol, _Period, 0), price, px, py)) return;
+
+   int cw = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int y = py - 7; 
+
+   string sfx_idx = IntegerToString(pt_idx+1)+"_"+sfx;
+   string n_lbl = PREFIX+"PTP_LBL_"+sfx_idx;
+   string n_val = PREFIX+"PTP_VAL_"+sfx_idx;
+   string n_del = PREFIX+"PTP_DEL_"+sfx_idx;
+
+   color col_lbl = hit ? clrGray : (ChartTheme == THEME_DARK ? clrWhite : clrBlack);
+   
+   string lbl_str = "TP" + IntegerToString(pt_idx+1);
+   if(hit) lbl_str += " ✓";
+   else lbl_str += " (" + DoubleToString(pct,0) + "%)";
+
+   double profit = 0.0;
+   ulong tkt = (ulong)StringToInteger(sfx);
+   int c_idx = GetCacheIdx(tkt);
+   profit = CalculatePartialProfit(tkt, c_idx, price, pct);
+   
+   string val_str = (profit >= 0 ? "+$" : "-$") + DoubleToString(MathAbs(profit), 2);
+   color col_val = hit ? clrGray : (profit >= 0 ? C'38,166,91' : clrRed);
+   
+   int ptp_font = (int)(9 * g_ui_scale);
+   if (ptp_font < 7) ptp_font = 7;
+
+   if(ObjectFind(0, n_lbl) < 0) {
+      ObjectCreate(0, n_lbl, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, n_lbl, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, n_lbl, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+      ObjectSetInteger(0, n_lbl, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, n_lbl, OBJPROP_HIDDEN, true);
+      ObjectSetString(0, n_lbl, OBJPROP_FONT, FontFace + " Bold");
+   }
+   ObjectSetInteger(0, n_lbl, OBJPROP_FONTSIZE, ptp_font);
+   ObjectSetInteger(0, n_lbl, OBJPROP_XDISTANCE, (int)(110 * g_ui_scale));
+   ObjectSetString(0, n_lbl, OBJPROP_TEXT, lbl_str);
+   ObjectSetInteger(0, n_lbl, OBJPROP_COLOR, col_lbl);
+   ObjectSetInteger(0, n_lbl, OBJPROP_YDISTANCE, y);
+
+   if(ObjectFind(0, n_val) < 0) {
+      ObjectCreate(0, n_val, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, n_val, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, n_val, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+      ObjectSetInteger(0, n_val, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, n_val, OBJPROP_HIDDEN, true);
+      ObjectSetString(0, n_val, OBJPROP_FONT, FontFace + " Bold");
+   }
+   ObjectSetInteger(0, n_val, OBJPROP_FONTSIZE, ptp_font);
+   ObjectSetInteger(0, n_val, OBJPROP_XDISTANCE, (int)(40 * g_ui_scale));
+   ObjectSetString(0, n_val, OBJPROP_TEXT, val_str);
+   ObjectSetInteger(0, n_val, OBJPROP_COLOR, col_val);
+   ObjectSetInteger(0, n_val, OBJPROP_YDISTANCE, y);
+
+   if(!hit) {
+      int btn_size = (int)(18 * g_ui_scale);
+      if (btn_size < 14) btn_size = 14;
+      
+      int del_x = cw - 10 - btn_size;
+      int del_y = py - btn_size/2;
+      SetBtn(n_del, del_x, del_y, btn_size, btn_size, "X", C'140,140,140', clrWhite, "Delete TP", 100);
+      ObjectSetInteger(0, n_del, OBJPROP_HIDDEN, false);
+   } else {
+      SafeDelete(n_del);
+   }
+}
+
+void SetPTPLine(int pt_idx, const string sfx, double price, double pct, bool hit)
+{
+   string n = PREFIX+"PTP_LN_"+IntegerToString(pt_idx+1)+"_"+sfx;
+   color col = hit ? clrGray : C'38,166,91';
+
+   if(ObjectFind(0, n) < 0) {
+      ObjectCreate(0,n,OBJ_HLINE,0,0,price);
+      ObjectSetInteger(0,n,OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0,n,OBJPROP_SELECTED, false);
+      ObjectSetInteger(0,n,OBJPROP_STYLE, STYLE_DASHDOT); 
+      ObjectSetInteger(0,n,OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0,n,OBJPROP_ZORDER, 5); 
+      ObjectSetInteger(0,n,OBJPROP_HIDDEN, true); 
+      ObjectSetInteger(0,n,OBJPROP_BACK, false);
+      ObjectSetString(0,n,OBJPROP_TOOLTIP,"\n");
+   }
+   
+   if(!hit && !(g_ptp_dragging && g_ptp_drag_idx == pt_idx && g_ptp_drag_tkt == (ulong)StringToInteger(sfx))) {
+      ObjectSetDouble(0,n,OBJPROP_PRICE,0,price);
+   } 
+   
+   ObjectSetInteger(0,n,OBJPROP_COLOR,col); 
+   UpdatePTP_Labels(pt_idx, sfx, ObjectGetDouble(0,n,OBJPROP_PRICE,0), pct, hit);
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  PANEL 1 (CLASSIC) MENU RENDERING
+// ─────────────────────────────────────────────────────────────────
+void SetPartialMenu_Classic(ulong ticket, int x, int y, int h, int zBase)
+{
+   string sfx = IntegerToString((int)ticket);
+   if(ticket != g_active_menu_ticket) {
+      SafeDelete(PREFIX+"PCT_25_"+sfx); SafeDelete(PREFIX+"PCT_50_"+sfx); SafeDelete(PREFIX+"PCT_75_"+sfx); SafeDelete(PREFIX+"PCT_100_"+sfx); SafeDelete(PREFIX+"ADDPTP_"+sfx);
+      return;
+   }
+   int bw=(int)(40*g_ui_scale); if(bw<30) bw=30;
+   int gap=(int)(2*g_ui_scale); if(gap<1) gap=1;
+   int bx_start = x + h + 4; 
+   int by = y + h + gap;
+   
+   SetBtn(PREFIX+"PCT_25_"+sfx,  bx_start,             by, bw, h, "25%",  c_Pct_BG,  clrWhite, "Close 25%",  zBase);
+   SetBtn(PREFIX+"PCT_50_"+sfx,  bx_start+bw+gap,      by, bw, h, "50%",  c_Pct_BG,  clrWhite, "Close 50%",  zBase); 
+   SetBtn(PREFIX+"PCT_75_"+sfx,  bx_start+(bw+gap)*2,  by, bw, h, "75%",  c_Pct_BG,  clrWhite, "Close 75%",  zBase); 
+   SetBtn(PREFIX+"PCT_100_"+sfx, bx_start+(bw+gap)*3,  by, bw, h, "100%", C'210,65,65', clrWhite, "Close 100%", zBase);
+
+   int by2 = by + h + gap;
+   SetBtn(PREFIX+"ADDPTP_"+sfx, bx_start, by2, bw*4+gap*3, h, "+ Add Partial TP", C'46,170,95', clrWhite, "Add Partial TP Line", zBase);
+}
+
+void SetRRMenu_Classic(ulong ticket, int x, int y, int h, int zBase)
+{
+   string sfx = IntegerToString((int)ticket);
+   if(ticket != g_active_rr_ticket) {
+      SafeDelete(PREFIX+"RR_1_"+sfx); SafeDelete(PREFIX+"RR_2_"+sfx); SafeDelete(PREFIX+"RR_3_"+sfx); SafeDelete(PREFIX+"RR_4_"+sfx);
+      return;
+   }
+   int bw=(int)(35*g_ui_scale); if(bw<28) bw=28;
+   int gap=(int)(2*g_ui_scale); if(gap<1) gap=1;
+   int bx_start = x; 
+   int by = y + h + gap;
+
+   SetBtn(PREFIX+"RR_1_"+sfx, bx_start - (bw*3) - (gap*3), by, bw, h, "1:"+DoubleToString(RR_Target_1,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_1,1), zBase);
+   SetBtn(PREFIX+"RR_2_"+sfx, bx_start - (bw*2) - (gap*2), by, bw, h, "1:"+DoubleToString(RR_Target_2,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_2,1), zBase); 
+   SetBtn(PREFIX+"RR_3_"+sfx, bx_start - bw - gap,         by, bw, h, "1:"+DoubleToString(RR_Target_3,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_3,1), zBase);
+   SetBtn(PREFIX+"RR_4_"+sfx, bx_start,                    by, bw, h, "1:"+DoubleToString(RR_Target_Custom,1), c_Pct_BG, clrWhite, "Set Custom TP 1:"+DoubleToString(RR_Target_Custom,1), zBase);
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+//  PANEL 2 (GEAR) TOOLBAR RENDERING
+// ─────────────────────────────────────────────────────────────────
+void SetPartialMenu_Gear(ulong ticket, int x, int y, int h, int zBase, bool up)
+{
+   string sfx = IntegerToString((int)ticket);
+   if(ticket != g_active_partial_ticket || h == 0) {
+      SafeDelete(PREFIX+"PCT_25_"+sfx); SafeDelete(PREFIX+"PCT_50_"+sfx); SafeDelete(PREFIX+"PCT_75_"+sfx); SafeDelete(PREFIX+"PCT_100_"+sfx);
+      return;
+   }
+   
+   int bw = (int)(80 * g_ui_scale); 
+   if (bw < 70) bw = 70; 
+   int m_h = h;
+   int gap = 1; 
+   
+   int dy1 = up ? -(m_h + gap) : (m_h + gap);
+   int dy2 = up ? -(m_h + gap)*2 : (m_h + gap)*2;
+   int dy3 = up ? -(m_h + gap)*3 : (m_h + gap)*3;
+   int dy4 = up ? -(m_h + gap)*4 : (m_h + gap)*4;
+   
+   SetBtn(PREFIX+"PCT_25_"+sfx,  x, y+dy1, bw, m_h, "25%",  c_Pct_BG, clrWhite, "Close 25%", zBase);
+   SetBtn(PREFIX+"PCT_50_"+sfx,  x, y+dy2, bw, m_h, "50%",  c_Pct_BG, clrWhite, "Close 50%", zBase); 
+   SetBtn(PREFIX+"PCT_75_"+sfx,  x, y+dy3, bw, m_h, "75%",  c_Pct_BG, clrWhite, "Close 75%", zBase); 
+   SetBtn(PREFIX+"PCT_100_"+sfx, x, y+dy4, bw, m_h, "100%", C'210,65,65', clrWhite, "Close 100%", zBase);
+
+   int r_top = up ? y + dy4 : y + dy1;
+   int r_bot = up ? y + dy1 + m_h : y + dy4 + m_h;
+   AddClickRect(x, x + bw, r_top, r_bot);
+}
+
+void SetRRMenu_Gear(ulong ticket, int x, int y, int h, int zBase, bool up)
+{
+   string sfx = IntegerToString((int)ticket);
+   if(ticket != g_active_rr_ticket || h == 0) {
+      SafeDelete(PREFIX+"RR_1_"+sfx); SafeDelete(PREFIX+"RR_2_"+sfx); SafeDelete(PREFIX+"RR_3_"+sfx); SafeDelete(PREFIX+"RR_4_"+sfx);
+      return;
+   }
+
+   int bw = (int)(80 * g_ui_scale); 
+   if (bw < 70) bw = 70;
+   int m_h = h;
+   int gap = 1; 
+
+   int dy1 = up ? -(m_h + gap) : (m_h + gap);
+   int dy2 = up ? -(m_h + gap)*2 : (m_h + gap)*2;
+   int dy3 = up ? -(m_h + gap)*3 : (m_h + gap)*3;
+   int dy4 = up ? -(m_h + gap)*4 : (m_h + gap)*4;
+
+   SetBtn(PREFIX+"RR_1_"+sfx, x, y+dy1, bw, m_h, "1:"+DoubleToString(RR_Target_1,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_1,1), zBase);
+   SetBtn(PREFIX+"RR_2_"+sfx, x, y+dy2, bw, m_h, "1:"+DoubleToString(RR_Target_2,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_2,1), zBase); 
+   SetBtn(PREFIX+"RR_3_"+sfx, x, y+dy3, bw, m_h, "1:"+DoubleToString(RR_Target_3,1), c_Pct_BG, clrWhite, "Set TP 1:"+DoubleToString(RR_Target_3,1), zBase);
+   SetBtn(PREFIX+"RR_4_"+sfx, x, y+dy4, bw, m_h, "1:"+DoubleToString(RR_Target_Custom,1), c_Pct_BG, clrWhite, "Set Custom TP 1:"+DoubleToString(RR_Target_Custom,1), zBase);
+
+   int r_top = up ? y + dy4 : y + dy1;
+   int r_bot = up ? y + dy1 + m_h : y + dy4 + m_h;
+   AddClickRect(x, x + bw, r_top, r_bot);
+}
+
+void SetContextMenu_Gear(ulong ticket, int x, int y, int w, int h, bool beActive, int zBase) 
+{
+   string sfx = IntegerToString((int)ticket);
+   string bB = PREFIX+"BTN_B_"+sfx;
+   string bR = PREFIX+"BTN_R_"+sfx;
+   string bP = PREFIX+"BTN_P_"+sfx;
+   string bA = PREFIX+"ADDPTP_"+sfx; 
+
+   if(ticket != g_active_menu_ticket) {
+      SafeDelete(bR); SafeDelete(bB); SafeDelete(bP); SafeDelete(bA);
+      SetRRMenu_Gear(ticket, 0, 0, 0, 0, false); 
+      SetPartialMenu_Gear(ticket, 0, 0, 0, 0, false);
+      return;
+   }
+
+   int m_h = h;
+   
+   // --- SMART UP/DOWN LOGIC ---
+   bool up = false;
+   long sl_y = ObjectGetInteger(0, PREFIX+"BX_S"+sfx, OBJPROP_YDISTANCE);
+   long tp_y = ObjectGetInteger(0, PREFIX+"BX_T"+sfx, OBJPROP_YDISTANCE);
+   int ch = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+   int needed = m_h * 5; 
+   
+   if(sl_y > 0 && sl_y > y && (sl_y - y) < needed) up = true;
+   if(tp_y > 0 && tp_y > y && (tp_y - y) < needed) up = true;
+   if(y + m_h + 2 + needed > ch) up = true;
+   
+   int menu_y = up ? (y - m_h - 2) : (y + m_h + 2);
+
+   int gap = 2; 
+   int sbw = (w - gap*3) / 4; 
+   int bx = x;
+   
+   // 1. BE
+   color beBg = beActive ? C'230,155,55' : c_BE_Inact_BG;
+   color beTc = beActive ? clrWhite : c_BE_Inact_TC;
+   SetBtn(bB, bx, menu_y, sbw, m_h, "BE", beBg, beTc, "Move SL to Entry", zBase+10);
+   bx += sbw + gap;
+   
+   // 2. RR
+   string rr_arrow = up ? "RR ▴" : "RR ▾";
+   SetBtn(bR, bx, menu_y, sbw, m_h, rr_arrow, c_Menu_BG, c_Menu_TC, "Set Risk:Reward", zBase+10);
+   int rr_x = bx;
+   bx += sbw + gap;
+   
+   // 3. PC
+   string pc_arrow = up ? "PC ▴" : "PC ▾";
+   SetBtn(bP, bx, menu_y, sbw, m_h, pc_arrow, c_Menu_BG, c_Menu_TC, "Partial Close", zBase+10);
+   int pc_x = bx;
+   bx += sbw + gap;
+   
+   // 4. +TP
+   int last_w = w - (bx - x); 
+   SetBtn(bA, bx, menu_y, last_w, m_h, "+TP", C'46,170,95', clrWhite, "Add Draggable Target", zBase+10);
+
+   AddClickRect(x, x + w, menu_y, menu_y + m_h);
+
+   if(g_active_rr_ticket == ticket) {
+       SetRRMenu_Gear(ticket, rr_x, menu_y, m_h, zBase+15, up);
+   } else {
+       SetRRMenu_Gear(ticket, 0,0,0,0, false);
+   }
+
+   if(g_active_partial_ticket == ticket) {
+       SetPartialMenu_Gear(ticket, pc_x, menu_y, m_h, zBase+15, up);
+   } else {
+       SetPartialMenu_Gear(ticket, 0,0,0,0, false);
+   }
+}
+
+void CleanEquityBox()
+{
+   SafeDelete(PREFIX+"EQ_BG_OUT");
+   SafeDelete(PREFIX+"EQ_BG_IN");
+   SafeDelete(PREFIX+"EQ_TX");
+}
+
+void DeleteTicketObjects(const string sfx)
+{
+   string lns[4]={"E","T","S","C"};
+   for(int i=0; i<4; i++) SafeDelete(PREFIX+"LN_"+lns[i]+sfx);
+   
+   string grps[3]={"E","T","S"};
+   for(int i=0; i<3; i++) {
+      string g=grps[i]+sfx;
+      SafeDelete(PREFIX+"BX_"+g+"_OUT"); SafeDelete(PREFIX+"BX_"+g+"_IN");
+      SafeDelete(PREFIX+"SD_"+g); SafeDelete(PREFIX+"S1_"+g);
+      SafeDelete(PREFIX+"LT_"+g); SafeDelete(PREFIX+"S2_"+g);
+      SafeDelete(PREFIX+"VL_"+g); SafeDelete(PREFIX+"SUB_"+g);
+   }
+   
+   string btns[6]={"BTN_E_","BTN_T_","BTN_S_","BTN_M_","BTN_B_","BTN_R_"};
+   for(int i=0; i<6; i++) SafeDelete(PREFIX+btns[i]+sfx);
+   SafeDelete(PREFIX+"BTN_P_"+sfx);
+   
+   string zns[4]={"ZN_RWD_","ZN_RSK_","ZN_PRG_RWD_","ZN_PRG_RSK_"};
+   for(int i=0; i<4; i++) SafeDelete(PREFIX+zns[i]+sfx);
+   
+   string pcts[4]={"PCT_25_","PCT_50_","PCT_75_","PCT_100_"};
+   for(int i=0; i<4; i++) SafeDelete(PREFIX+pcts[i]+sfx);
+   
+   SafeDelete(PREFIX+"RR_1_"+sfx); SafeDelete(PREFIX+"RR_2_"+sfx); SafeDelete(PREFIX+"RR_3_"+sfx); SafeDelete(PREFIX+"RR_4_"+sfx);
+   
+   SafeDelete(PREFIX+"ADDPTP_"+sfx);
+   for(int i=0; i<4; i++) {
+      string sfx_idx = IntegerToString(i+1)+"_"+sfx;
+      SafeDelete(PREFIX+"PTP_LN_"+sfx_idx);
+      SafeDelete(PREFIX+"PTP_LBL_"+sfx_idx);
+      SafeDelete(PREFIX+"PTP_VAL_"+sfx_idx);
+      SafeDelete(PREFIX+"PTP_DEL_"+sfx_idx);
+   }
+   
+   SafeDelete(PREFIX+"ZTX_RSK_"+sfx);
+   SafeDelete(PREFIX+"ZTX_RWD_"+sfx);
+   SafeDelete(PREFIX+"ZTX_MID_"+sfx);
+}
+
+void SetLabel(ulong ticket, const string id, double price, string sideStr, string lotStr,
+              string valStr, color sideCol, color valCol,
+              color bgCol, color borderCol, color dimCol, color sepCol,
+              string subText, color subTextCol, bool beActive, int zBase)
+{
+   int px,py;
+   if(!ChartTimePriceToXY(0,0,iTime(_Symbol,_Period,0),price,px,py)) return;
+   string sfx = IntegerToString((int)ticket);
+   
+   int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   int ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+   int W = g_dyn_W;
+   int H = g_dyn_H;
+   int T = Border_Thickness;
+   
+   bool isEntry = (StringGetCharacter(id,0)=='E');
+   
+   int menu_w = 0;
+   if(isEntry) {
+      if(PanelStyle == PANEL_1_CLASSIC) menu_w = (H + 4) * 3;
+      else menu_w = H + 2; 
+   }
+   int close_w = H + 2;
+   int full_w = menu_w + W + close_w;
+   
+   int sub_h = (int)(15 * g_ui_scale);
+   int full_h = H + (subText != "" ? sub_h : 0);
+   
+   int test_bx = cw - (int)(Label_FromRight * g_ui_scale);
+   
+   int right_margin = 15; 
+   if(test_bx + W + close_w > cw - right_margin) {
+       test_bx = cw - right_margin - W - close_w;
+   }
+   if(test_bx - menu_w < 10) test_bx = 10 + menu_w;
+
+   int test_by = MathMax(T+1, MathMin(ch - full_h - T - 1, py - H/2));
+
+   bool collision = true;
+   int iter = 0;
+   while(collision && iter < 30) {
+       collision = false;
+       for(int i=0; i<ArraySize(g_layout_rects); i++) {
+           if(test_by < g_layout_rects[i].bottom + 2 && test_by + full_h > g_layout_rects[i].top - 2) {
+              collision = true;
+              
+              int center_existing = (g_layout_rects[i].top + g_layout_rects[i].bottom) / 2;
+              int center_new = test_by + full_h / 2;
+              
+              if(center_new >= center_existing) {
+                  test_by = g_layout_rects[i].bottom + 2; 
+              } else {
+                  test_by = g_layout_rects[i].top - full_h - 2; 
+              }
+              break;
+           }
+       }
+       iter++;
+   }
+
+   test_by = MathMax(T+1, MathMin(ch - full_h - T - 1, test_by));
+
+   int sz = ArraySize(g_layout_rects);
+   ArrayResize(g_layout_rects, sz+1);
+   g_layout_rects[sz].left = test_bx - menu_w;
+   g_layout_rects[sz].right = test_bx + W + close_w;
+   g_layout_rects[sz].top = test_by;
+   g_layout_rects[sz].bottom = test_by + full_h;
+
+   int bx = test_bx;
+   int by = test_by;
+
+   int tY=by+H/2-g_dyn_Font/2-1;
+   int cw0=(int)(g_dyn_Font*0.68);
+
+   SetRect(PREFIX+"BX_"+id,bx,by,W,H,bgCol,borderCol,T,zBase);
+   int x1=bx+T+6;
+   SetText(PREFIX+"SD_"+id,x1,tY,sideStr,sideCol,-1,zBase);
+   
+   int x2=x1+(int)(StringLen(sideStr)*cw0)+4;
+   SetText(PREFIX+"S1_"+id,x2,tY,"|",sepCol,-1,zBase);
+   
+   int x3=x2+cw0+4;
+   SetText(PREFIX+"LT_"+id,x3,tY,ShowLotSize?lotStr:"",dimCol,-1,zBase);
+   
+   int lotW=ShowLotSize?(int)(StringLen(lotStr)*cw0)+4:0;
+   int x4=x3+lotW;
+   SetText(PREFIX+"S2_"+id,x4,tY,"|",sepCol,-1,zBase);
+   
+   int x5=x4+cw0+4;
+   SetText(PREFIX+"VL_"+id,x5,tY,valStr,valCol,-1,zBase);
+
+   if(subText!="") {
+      int subFont = g_dyn_Font - 1;
+      if (subFont < 6) subFont = 6;
+      SetText(PREFIX+"SUB_"+id,bx,by+H+2,subText,subTextCol,subFont,zBase);
+   }
+   else SafeDelete(PREFIX+"SUB_"+id);
+
+   int closeBtnX = bx + W + 2;
+   
+   if (isEntry) {
+      if(PanelStyle == PANEL_1_CLASSIC) {
+          int leftBtnX = bx;
+          
+          leftBtnX -= (H+4);
+          SetBtn(PREFIX+"BTN_M_"+sfx, leftBtnX, by, H, H, "▼", c_Menu_BG, c_Menu_TC, "Partial Close Menu", zBase);
+          SetPartialMenu_Classic(ticket, leftBtnX, by, H, zBase);
+          
+          leftBtnX -= (H+4);
+          color beBg  = beActive ? C'230,155,55' : c_BE_Inact_BG;
+          color beTc  = beActive ? clrWhite      : c_BE_Inact_TC;
+          SetBtn(PREFIX+"BTN_B_"+sfx, leftBtnX, by, H, H, "BE", beBg, beTc, "Move SL to Breakeven", zBase);
+          
+          leftBtnX -= (H+4);
+          SetBtn(PREFIX+"BTN_R_"+sfx, leftBtnX, by, H, H, "RR", C'51,122,183', clrWhite, "Risk:Reward Targets", zBase);
+          SetRRMenu_Classic(ticket, leftBtnX, by, H, zBase);
+          
+      } else {
+          int menuBtnX = bx - H - 2;
+          SetBtn(PREFIX+"BTN_M_"+sfx, menuBtnX, by, H, H, "⚙\xFE0E", c_Gear_BG, c_Gear_TC, "Context Menu", zBase, true);
+          // Pass the base 'by' to the context menu, let it handle up/down placement
+          SetContextMenu_Gear(ticket, menuBtnX, by, full_w, H, beActive, zBase);
+      }
+      SetBtn(PREFIX+"BTN_E_"+sfx, closeBtnX, by, H, H, "X", C'200,60,60', clrWhite, "Close Position", zBase);
+   } else {
+      string act = StringSubstr(id,0,1);
+      SetBtn(PREFIX+"BTN_"+act+"_"+sfx, closeBtnX, by, H, H, "X", C'200,60,60', clrWhite, "Remove", zBase);
+   }
+}
+
+void CleanCache()
+{
+   int sz = ArraySize(g_ppp_cache);
+   for(int i = sz - 1; i >= 0; i--) {
+      if(!PositionSelectByTicket(g_ppp_cache[i].ticket)) {
+         for(int j = i; j < sz - 1; j++) g_ppp_cache[j] = g_ppp_cache[j+1];
+         sz--; ArrayResize(g_ppp_cache, sz);
+      }
+   }
+}
+
+void RefreshBoxes()
+{
+   UpdateScale(); 
+   ApplyTheme();
+
+   ArrayResize(g_layout_rects,0); 
+   ArrayResize(g_click_rects,0); 
+   
+   double safe_point = (_Point > 0) ? _Point : 0.00001;
+
+   PosData aPos[]; 
+   int aCnt = 0;
+   
+   for(int i=0; i<PositionsTotal(); i++){
+      ulong t = PositionGetTicket(i);
+      if(t>0 && PositionGetString(POSITION_SYMBOL)==_Symbol){
+         ArrayResize(aPos, aCnt+1);
+         aPos[aCnt].tkt = t;
+         aPos[aCnt].tm = (datetime)PositionGetInteger(POSITION_TIME);
+         aCnt++;
+      }
+   }
+   
+   for(int i=0; i<aCnt-1; i++){
+      for(int j=i+1; j<aCnt; j++){
+         if(aPos[j].tm < aPos[i].tm){
+            PosData tmp = aPos[i]; aPos[i] = aPos[j]; aPos[j] = tmp;
+         }
+      }
+   }
+
+   string activeTickets[];
+   ArrayResize(activeTickets,aCnt);
+   for(int a=0; a<aCnt; a++) activeTickets[a] = IntegerToString((int)aPos[a].tkt);
+
+   if(aCnt==0){ 
+      DeleteAll(); ArrayResize(g_drawn_tickets,0); 
+      g_active_menu_ticket=0; g_active_rr_ticket=0; g_active_partial_ticket=0; return; 
+   }
+
+   for(int k=0; k<ArraySize(g_drawn_tickets); k++){
+      bool found=false;
+      for(int a=0; a<aCnt; a++) {
+         if(g_drawn_tickets[k] == activeTickets[a]) { found=true; break; }
+      }
+      if(!found){
+         if((ulong)StringToInteger(g_drawn_tickets[k]) == g_active_menu_ticket) g_active_menu_ticket = 0;
+         if((ulong)StringToInteger(g_drawn_tickets[k]) == g_active_rr_ticket) g_active_rr_ticket = 0;
+         if((ulong)StringToInteger(g_drawn_tickets[k]) == g_active_partial_ticket) g_active_partial_ticket = 0;
+         DeleteTicketObjects(g_drawn_tickets[k]);
+      }
+   }
+   
+   ArrayResize(g_drawn_tickets,aCnt);
+   for(int a=0; a<aCnt; a++) g_drawn_tickets[a] = activeTickets[a];
+
+   int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+   
+   // --- PERFECT ZONE ALIGNMENT (No Gap) ---
+   int menu_w = (PanelStyle == PANEL_1_CLASSIC) ? (g_dyn_H + 4) * 3 : (g_dyn_H + 2);
+   int close_w = g_dyn_H + 2;
+   
+   int test_bx = cw - (int)(Label_FromRight * g_ui_scale);
+   int right_margin = 15;
+   if(test_bx + g_dyn_W + close_w > cw - right_margin) {
+       test_bx = cw - right_margin - g_dyn_W - close_w;
+   }
+   if(test_bx - menu_w < 10) test_bx = 10 + menu_w;
+   
+   int labelX = test_bx - menu_w - 5; // Perfect 5px padding flush to UI
+   // ----------------------------------------
+   
+   datetime boxEndTime=0; double dummyP=0; int dummySub=0;
+   if(!ChartXYToTimePrice(0,labelX,0,dummySub,boxEndTime,dummyP))
+      boxEndTime=TimeCurrent()+PeriodSeconds(_Period)*5;
+
+   datetime insetTime = boxEndTime; 
+
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+
+      long   pType  = PositionGetInteger(POSITION_TYPE);
+      double entry  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double tp     = PositionGetDouble(POSITION_TP);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double lot    = PositionGetDouble(POSITION_VOLUME);
+      double curP   = PositionGetDouble(POSITION_PRICE_CURRENT);
+      datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
+
+      ENUM_ORDER_TYPE ot=(pType==POSITION_TYPE_BUY)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+      bool   isBuy  =(pType==POSITION_TYPE_BUY);
+      string sfx    =IntegerToString((int)ticket);
+      color  lCol   =isBuy?Color_Buy:Color_Sell;
+
+      int tIdx=0; 
+      for(int a=0; a<aCnt; a++) {
+         if(aPos[a].tkt==ticket) { tIdx=a+1; break; }
+      }
+      
+      string ord="";
+      if(tIdx==2) ord="2nd "; else if(tIdx==3) ord="3rd "; else if(tIdx>3) ord=IntegerToString(tIdx)+"th ";
+
+      color  pCol  = (profit>=0) ? Color_Profit : Color_Loss;
+      string pTxt  = ((profit>=0)?"+$":"-$")+DoubleToString(MathAbs(profit),2);
+
+      color eBgCol     = Entry_Solid_Fill ? lCol : Entry_BG_Color; 
+      color eBorderCol = lCol;
+      color eSideCol   = Entry_Solid_Fill ? clrWhite : lCol;
+      color eValCol    = Entry_Solid_Fill ? clrWhite : pCol;
+      color eDimCol    = Entry_Solid_Fill ? clrWhite : Label_DimText;
+      color eSepCol    = Entry_Solid_Fill ? clrWhite : Sep_Color;
+
+      bool   inProfit =(isBuy ? curP>entry : curP<entry);
+
+      int zBase=10+(i*10);
+
+      bool isRiskFree = false;
+      if(sl > 0) {
+          double diff = isBuy ? (sl - entry) : (entry - sl);
+          if(diff >= -safe_point) isRiskFree = true;
+      }
+
+      double risk_dist = (sl>0) ? MathAbs(entry-sl) : 0;
+      double rwd_dist  = (tp>0) ? MathAbs(entry-tp)  : 0;
+      
+      string rr_str;
+      if (isRiskFree) rr_str = "INF";
+      else if (risk_dist > safe_point * 0.5) rr_str = DoubleToString(rwd_dist / risk_dist, 1);
+      else rr_str = "0.0";
+
+      SetLine("E"+sfx,openTime,boxEndTime,entry,lCol,Entry_LineWidth,Entry_Dashed);
+      
+      string entrySub = "";
+      if(ZoneText_Mode==SUB_LABEL && ShowZoneText && tp>0 && sl>0) {
+         if (isRiskFree) entrySub = "RR 1 : INF";
+         else entrySub = "RR 1 : " + rr_str;
+      }
+      
+      SetLabel(ticket, "E"+sfx,entry,ord+(isBuy?"BUY":"SELL"),DoubleToString(lot,2),pTxt,
+               eSideCol,eValCol,eBgCol,eBorderCol,eDimCol,eSepCol,entrySub,c_Zone_Text_Color,inProfit,zBase);
+
+      int c_idx=-1;
+      for(int c=0; c<ArraySize(g_ppp_cache); c++) {
+         if(g_ppp_cache[c].ticket==ticket) { c_idx=c; break; }
+      }
+      
+      if(c_idx<0) {
+         c_idx=ArraySize(g_ppp_cache); ArrayResize(g_ppp_cache,c_idx+1);
+         g_ppp_cache[c_idx].ticket=ticket; 
+         g_ppp_cache[c_idx].volume=lot;
+         g_ppp_cache[c_idx].initial_volume=lot;
+         g_ppp_cache[c_idx].sl_price=-1; 
+         g_ppp_cache[c_idx].tp_price=-1;
+         
+         for(int k=0; k<4; k++) {
+            string gv_name = PREFIX+"PTP_TK_"+IntegerToString(ticket)+"_"+IntegerToString(k);
+            if(GlobalVariableCheck(gv_name)) {
+               g_ppp_cache[c_idx].ptp_active[k] = true;
+               g_ppp_cache[c_idx].ptp_hit[k] = false;
+               g_ppp_cache[c_idx].ptp_price[k] = GlobalVariableGet(gv_name);
+            } else {
+               g_ppp_cache[c_idx].ptp_active[k] = false;
+               g_ppp_cache[c_idx].ptp_hit[k] = false;
+               g_ppp_cache[c_idx].ptp_price[k] = 0;
+            }
+         }
+      } else {
+         if(lot > g_ppp_cache[c_idx].initial_volume) g_ppp_cache[c_idx].initial_volume = lot;
+         if(lot != g_ppp_cache[c_idx].volume) {
+            g_ppp_cache[c_idx].tp_price = -1; 
+            g_ppp_cache[c_idx].sl_price = -1; 
+            g_ppp_cache[c_idx].volume = lot;
+         }
+      }
+
+      for(int pt=0; pt<4; pt++) {
+         if(g_ppp_cache[c_idx].ptp_active[pt]) {
+            bool hit = g_ppp_cache[c_idx].ptp_hit[pt];
+            double target = g_ppp_cache[c_idx].ptp_price[pt];
+            double pct = (pt==0) ? Partial_TP1_Pct : (pt==1) ? Partial_TP2_Pct : (pt==2) ? Partial_TP3_Pct : Partial_TP4_Pct;
+            
+            SetPTPLine(pt, sfx, target, pct, hit);
+         } else {
+            string sfx_idx = IntegerToString(pt+1)+"_"+sfx;
+            SafeDelete(PREFIX+"PTP_LN_"+sfx_idx);
+            SafeDelete(PREFIX+"PTP_LBL_"+sfx_idx);
+            SafeDelete(PREFIX+"PTP_VAL_"+sfx_idx);
+            SafeDelete(PREFIX+"PTP_DEL_"+sfx_idx);
+         }
+      }
+
+      if(tp>0)
+      {
+         double tpM=0;
+         if(tp==g_ppp_cache[c_idx].tp_price && lot==g_ppp_cache[c_idx].volume) tpM=g_ppp_cache[c_idx].tp_money;
+         else {
+            if(MathAbs(tp-entry) < safe_point*0.5) tpM=0; 
+            else {
+               if(!OrderCalcProfit(ot,_Symbol,lot,entry,tp,tpM)){
+                  double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE); double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+                  double dist=(ot==ORDER_TYPE_BUY)?(tp-entry):(entry-tp); if(ts>0) tpM=(dist/ts)*tv*lot;
+               }
+            }
+            g_ppp_cache[c_idx].tp_price=tp; g_ppp_cache[c_idx].tp_money=tpM; g_ppp_cache[c_idx].volume=lot;
+         }
+
+         double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+         double rwd_pct = (bal>0) ? (MathAbs(tpM)/bal)*100.0 : 0;
+         
+         string rwdTxt = "";
+         if (isRiskFree) rwdTxt = "Reward INF  ( " + DoubleToString(rwd_pct, 2) + " % )                    ";
+         else rwdTxt = "Reward " + rr_str + "  ( " + DoubleToString(rwd_pct, 2) + " % )                    ";
+
+         if(ZoneText_Mode == ZONE_INSIDE) {
+            SafeDelete(PREFIX+"SUB_T"+sfx);
+            SetChartText("RWD_"+sfx, insetTime, tp, rwdTxt, c_Zone_Text_Color, ANCHOR_RIGHT_LOWER, zBase);
+         } else SafeDelete(PREFIX+"ZTX_RWD_"+sfx);
+
+         SetZone("RWD_"+sfx,openTime,boxEndTime,entry,tp,c_Zone_Reward);
+         SetLine("T"+sfx,openTime,boxEndTime,tp,Color_TP,TP_LineWidth,TP_Dashed);
+         color tpCol=(tpM>=0)?Color_Profit:Color_Loss;
+         string tpSub = (ZoneText_Mode==SUB_LABEL) ? rwdTxt : "";
+         
+         SetLabel(ticket, "T"+sfx,tp,ord+"TP",DoubleToString(lot,2),((tpM>=0)?"+$":"-$")+DoubleToString(MathAbs(tpM),2),Color_TP,tpCol,
+                  Label_BG,Color_TP,Label_DimText,Sep_Color, tpSub,c_Zone_Text_Color,false,zBase);
+      }
+      else {
+         SafeDelete(PREFIX+"ZTX_RWD_"+sfx); SafeDelete(PREFIX+"ZN_RWD_"+sfx); SafeDelete(PREFIX+"LN_T"+sfx);
+         SafeDelete(PREFIX+"BX_T"+sfx+"_OUT"); SafeDelete(PREFIX+"BX_T"+sfx+"_IN"); SafeDelete(PREFIX+"SD_T"+sfx); 
+         SafeDelete(PREFIX+"S1_T"+sfx); SafeDelete(PREFIX+"LT_T"+sfx); SafeDelete(PREFIX+"S2_T"+sfx);
+         SafeDelete(PREFIX+"VL_T"+sfx); SafeDelete(PREFIX+"SUB_T"+sfx); SafeDelete(PREFIX+"BTN_T_"+sfx);
+      }
+
+      if(sl>0)
+      {
+         double slM=0;
+         if(sl==g_ppp_cache[c_idx].sl_price && lot==g_ppp_cache[c_idx].volume) slM=g_ppp_cache[c_idx].sl_money;
+         else {
+            if(MathAbs(sl-entry) < safe_point*0.5) slM=0; 
+            else {
+               if(!OrderCalcProfit(ot,_Symbol,lot,entry,sl,slM)){
+                  double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE); double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+                  double dist=(ot==ORDER_TYPE_BUY)?(sl-entry):(entry-sl); if(ts>0) slM=(dist/ts)*tv*lot;
+               }
+            }
+            g_ppp_cache[c_idx].sl_price=sl; g_ppp_cache[c_idx].sl_money=slM; g_ppp_cache[c_idx].volume=lot;
+         }
+
+         double bal        = AccountInfoDouble(ACCOUNT_BALANCE);
+         double risk_pct   = (bal>0) ? (MathAbs(slM)/bal)*100.0 : 0;
+
+         string rskTxt = "";
+         if (isRiskFree) rskTxt = "Risk-Free                    ";
+         else rskTxt = "Risk 1  ( " + DoubleToString(risk_pct, 2) + " % )                    ";
+
+         if(ZoneText_Mode == ZONE_INSIDE) {
+            SafeDelete(PREFIX+"SUB_S"+sfx);
+            SetChartText("RSK_"+sfx, insetTime, sl, rskTxt, c_Zone_Text_Color, ANCHOR_RIGHT_UPPER, zBase);
+         } else SafeDelete(PREFIX+"ZTX_RSK_"+sfx);
+
+         SetZone("RSK_"+sfx,openTime,boxEndTime,entry,sl,c_Zone_Risk);
+         SetLine("S"+sfx,openTime,boxEndTime,sl,Color_SL,SL_LineWidth,SL_Dashed);
+         color slCol=(slM>=0)?Color_Profit:Color_Loss;
+         string slSub = (ZoneText_Mode==SUB_LABEL) ? rskTxt : "";
+         
+         SetLabel(ticket, "S"+sfx,sl,ord+"SL",DoubleToString(lot,2),((slM>=0)?"+$":"-$")+DoubleToString(MathAbs(slM),2),Color_SL,slCol,
+                  Label_BG,Color_SL,Label_DimText,Sep_Color, slSub,c_Zone_Text_Color,false,zBase);
+      }
+      else {
+         SafeDelete(PREFIX+"ZTX_RSK_"+sfx); SafeDelete(PREFIX+"ZN_RSK_"+sfx); SafeDelete(PREFIX+"LN_S"+sfx);
+         SafeDelete(PREFIX+"BX_S"+sfx+"_OUT"); SafeDelete(PREFIX+"BX_S"+sfx+"_IN"); SafeDelete(PREFIX+"SD_S"+sfx); 
+         SafeDelete(PREFIX+"S1_S"+sfx); SafeDelete(PREFIX+"LT_S"+sfx); SafeDelete(PREFIX+"S2_S"+sfx);
+         SafeDelete(PREFIX+"VL_S"+sfx); SafeDelete(PREFIX+"SUB_S"+sfx); SafeDelete(PREFIX+"BTN_S_"+sfx);
+      }
+
+      if(ZoneText_Mode == ZONE_INSIDE && tp>0 && sl>0 && !isRiskFree) {
+         string midTxt = "RR 1 : " + rr_str + "                    "; 
+         SetChartText("MID_"+sfx, insetTime, entry, midTxt, c_Zone_Text_Color, ANCHOR_RIGHT_UPPER, zBase);
+      } else SafeDelete(PREFIX+"ZTX_MID_"+sfx);
+
+      if(isBuy){
+         if(curP>entry){
+            if(tp>0) SetZone("PRG_RWD_"+sfx,openTime,boxEndTime,entry,MathMin(curP,tp),c_Zone_Reward_Progress);
+            else SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx);
+            SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx);
+         } else if(curP<entry){
+            if(sl>0) SetZone("PRG_RSK_"+sfx,openTime,boxEndTime,entry,MathMax(curP,sl),c_Zone_Risk_Progress);
+            else SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx);
+            SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx);
+         } else { SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx); SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx); }
+      } else {
+         if(curP<entry){
+            if(tp>0) SetZone("PRG_RWD_"+sfx,openTime,boxEndTime,entry,MathMax(curP,tp),c_Zone_Reward_Progress);
+            else SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx);
+            SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx);
+         } else if(curP>entry){
+            if(sl>0) SetZone("PRG_RSK_"+sfx,openTime,boxEndTime,entry,MathMin(curP,sl),c_Zone_Risk_Progress);
+            else SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx);
+            SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx);
+         } else { SafeDelete(PREFIX+"ZN_PRG_RWD_"+sfx); SafeDelete(PREFIX+"ZN_PRG_RSK_"+sfx); }
+      }
+
+      color prgLineCol=isBuy?(curP>=entry?Color_TP:Color_SL):(curP<=entry?Color_TP:Color_SL);
+      SetLine("C"+sfx,openTime,boxEndTime,curP,prgLineCol,1,true);
+   }
+
+   CleanEquityBox();
+   g_needs_redraw = true;
+}
+
+int OnInit()
+{
+   PREFIX = "VRT_" + IntegerToString(ChartID()) + "_";
+   ObjectsDeleteAll(0, PREFIX);
+   
+   ApplyTheme();
+   
+   if (Partial_TP1_Pct + Partial_TP2_Pct + Partial_TP3_Pct + Partial_TP4_Pct > 100.0) {
+      Print("Warning: Total Partial TP percentages exceed 100%!");
+   }
+
+   string oldPfx[]={
+      "VRT_","TV108_","TV107_","TV106_","TV105_","TV104_","TV103_","TV102_","TV101_","TV100_","TV99_","TV98_","TV97_","TV96_","TV95_","TV94_","TV93_","TV92_","TV91_","TV90_","TV89_","TV88_","TV87_","TV86_","TV85_","TV84_",
+      "TV83_","TV82_","TV81_","TV80_","TV79_","TV78_","TV77_","TV76_","TV75_","TV74_","TV73_","TV72_","TV71_","TV70_","TV69_","TV68_","TV67_","TV66_","TV65_","TV64_","TV63_","TV62_","TV61_","TV60_",
+      "TV59_","TV58_","TV57_","TV56_","TV55_","TV54_","TV53_","TV52_","TV51_","TV50_","TV49_","TV48_","TV47_","TV46_","TV40_","TV39_","TV38_","TV37_","TV36_","TV35_",
+      "TV34_","TV33_","TV32_","TV31_","TV30_"
+   };
+   for(int p=0; p<ArraySize(oldPfx); p++) ObjectsDeleteAll(0,oldPfx[p]);
+
+   EventSetMillisecondTimer(250);
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetDeviationInPoints(100);
+
+   g_needs_redraw=false;
+   ArrayResize(g_drawn_tickets,0);
+   ArrayResize(g_ppp_cache,0);
+   g_active_menu_ticket=0;
+   g_active_rr_ticket=0;
+   g_active_partial_ticket=0;
+   g_force_redraw_ticks=0;
+   g_last_cw=0; g_last_pMax=0; g_last_pMin=0;
+   g_last_chart_change_tick=0;
+   
+   g_ptp_dragging = false;
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+   ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,false);
+   ChartSetInteger(0,CHART_MOUSE_SCROLL,true); 
+   DeleteAll();
+}
+
+void OnTimer()
+{
+   static int    lastPosCount = -1;
+   static double lastEquity   = -1;
+   static double lastProfit   = 0;
+   static double lastCurPrice = 0;
+   static double lastSLSum    = -1;
+   static double lastTPSum    = -1;
+
+   if(!ChartGetInteger(0,CHART_VISIBLE_BARS)) return;
+
+   int    curPosCount = PositionsTotal();
+   double curEquity   = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(lastPosCount != -1)
+   {
+      if(curPosCount < lastPosCount)
+      {
+         ulong closedTkts[]; int closedCnt=0;
+         
+         for(int c=0; c<ArraySize(g_ppp_cache); c++){
+            if(!PositionSelectByTicket(g_ppp_cache[c].ticket)){
+               ArrayResize(closedTkts,closedCnt+1);
+               closedTkts[closedCnt++] = g_ppp_cache[c].ticket;
+            }
+         }
+         
+         for(int c=0; c<closedCnt; c++){
+            for(int k=0; k<4; k++) GlobalVariableDel(PREFIX+"PTP_TK_"+IntegerToString(closedTkts[c])+"_"+IntegerToString(k));
+            
+            if(HistorySelectByPosition(closedTkts[c])){
+               for(int d=HistoryDealsTotal()-1; d>=0; d--){
+                  ulong deal = HistoryDealGetTicket(d);
+                  if(deal==0) continue;
+                  
+                  if(HistoryDealGetInteger(deal,DEAL_ENTRY)==DEAL_ENTRY_OUT){
+                     long reason = HistoryDealGetInteger(deal,DEAL_REASON);
+                     if(reason==DEAL_REASON_TP){ if(Sound_TP_Hit!="") PlaySound(Sound_TP_Hit); }
+                     else if(reason==DEAL_REASON_SL){ if(Sound_SL_Hit!="") PlaySound(Sound_SL_Hit); }
+                     else {
+                        for(int cc=0; cc<ArraySize(g_ppp_cache); cc++){
+                           if(g_ppp_cache[cc].ticket == closedTkts[c]){
+                              double p = HistoryDealGetDouble(deal,DEAL_PRICE);
+                              if(g_ppp_cache[cc].tp_price>0 && MathAbs(p-g_ppp_cache[cc].tp_price)<50*_Point) { if(Sound_TP_Hit!="") PlaySound(Sound_TP_Hit); }
+                              else if(g_ppp_cache[cc].sl_price>0 && MathAbs(p-g_ppp_cache[cc].sl_price)<50*_Point) { if(Sound_SL_Hit!="") PlaySound(Sound_SL_Hit); }
+                              break;
+                           }
+                        }
+                     }
+                     break;
+                  }
+               }
+            }
+         }
+      }
+      else if(curPosCount > lastPosCount)
+      {
+         if(Sound_Order_Filled!="") PlaySound(Sound_Order_Filled);
+      }
+   }
+
+   g_cache_cleanup_tick++;
+   if(g_cache_cleanup_tick >= 10) { CleanCache(); g_cache_cleanup_tick = 0; }
+
+   double curProfit=0, curPrice=0, curSLSum=0, curTPSum=0;
+   for(int i=0; i<curPosCount; i++){
+      ulong t = PositionGetTicket(i);
+      if(t>0 && PositionGetString(POSITION_SYMBOL)==_Symbol){
+         curProfit += PositionGetDouble(POSITION_PROFIT);
+         curPrice   = PositionGetDouble(POSITION_PRICE_CURRENT);
+         curSLSum  += PositionGetDouble(POSITION_SL);
+         curTPSum  += PositionGetDouble(POSITION_TP);
+         
+         int c_idx = GetCacheIdx(t);
+         if(c_idx >= 0) {
+            bool isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+            double curVol = PositionGetDouble(POSITION_VOLUME);
+            
+            for(int pt=0; pt<4; pt++) {
+               if(g_ppp_cache[c_idx].ptp_active[pt] && !g_ppp_cache[c_idx].ptp_hit[pt]) {
+                  double target = g_ppp_cache[c_idx].ptp_price[pt];
+                  if(target > 0) {
+                     bool hit = isBuy ? (curPrice >= target) : (curPrice <= target);
+                     if(hit) {
+                        g_ppp_cache[c_idx].ptp_hit[pt] = true;
+                        GlobalVariableDel(PREFIX+"PTP_TK_"+IntegerToString(t)+"_"+IntegerToString(pt)); 
+                        
+                        double pct = (pt==0) ? Partial_TP1_Pct : (pt==1) ? Partial_TP2_Pct : (pt==2) ? Partial_TP3_Pct : Partial_TP4_Pct;
+                        double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+                        double minv = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+                        if(step <= 0) step = 0.01;
+                        
+                        double init_vol = g_ppp_cache[c_idx].initial_volume;
+                        double close_vol = NormalizeDouble(MathFloor((init_vol * (pct / 100.0)) / step) * step, 2);
+                        
+                        if(close_vol >= minv && curVol >= minv) {
+                           if(close_vol >= curVol - minv) trade.PositionClose(t);
+                           else trade.PositionClosePartial(t, close_vol);
+                           Print("Partial TP", pt+1, " Hit! Closed: ", close_vol, " lots.");
+                           if(Sound_TP_Hit != "") PlaySound(Sound_TP_Hit);
+                        }
+                        
+                        if(Move_BE_After_TP1 && pt == 0) {
+                           trade.PositionModify(t, NormalizeDouble(PositionGetDouble(POSITION_PRICE_OPEN), _Digits), PositionGetDouble(POSITION_TP));
+                           Print("Auto Breakeven Executed.");
+                        }
+                        
+                        g_needs_redraw = true;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   bool posChanged  = (curPosCount != lastPosCount);
+   bool equityMoved = (MathAbs(curEquity-lastEquity) >= 0.01);
+   bool profitMoved = (MathAbs(curProfit-lastProfit) >= 0.01);
+   bool priceMoved  = (MathAbs(curPrice-lastCurPrice) >= _Point*10);
+   bool sltpMoved   = (MathAbs(curSLSum-lastSLSum) >= _Point) || (MathAbs(curTPSum-lastTPSum) >= _Point);
+
+   bool needsUpdate = posChanged||equityMoved||profitMoved||priceMoved||sltpMoved;
+   if(g_force_redraw_ticks>0) { needsUpdate = true; g_force_redraw_ticks--; }
+   
+   if(!needsUpdate && !g_ptp_dragging) return;
+
+   lastPosCount=curPosCount; lastEquity=curEquity;
+   lastProfit=curProfit; lastCurPrice=curPrice;
+   lastSLSum=curSLSum; lastTPSum=curTPSum;
+
+   if(!g_ptp_dragging) {
+      g_needs_redraw=false;
+      RefreshBoxes();
+      if(g_needs_redraw) ChartRedraw();
+   }
+}
+
+void OnChartEvent(const int id,const long &lp,const double &dp,const string &sp)
+{
+   if(id == CHARTEVENT_CLICK) 
+   {
+      return;
+   }
+
+   if(id==CHARTEVENT_MOUSE_MOVE)
+   {
+      int mx=(int)lp, my=(int)dp;
+      uint state=(uint)StringToInteger(sp);
+      bool left_click = (state & 1) != 0;
+      int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+
+      if(left_click) {
+         if(!g_ptp_dragging) {
+            for(int c=0; c<ArraySize(g_ppp_cache); c++) {
+               for(int pt=0; pt<4; pt++) {
+                  if(g_ppp_cache[c].ptp_active[pt] && !g_ppp_cache[c].ptp_hit[pt]) {
+                     int l_px, l_py;
+                     if(ChartTimePriceToXY(0,0,0, g_ppp_cache[c].ptp_price[pt], l_px, l_py)) {
+                        if(MathAbs(my - l_py) <= 10) {
+                           if(mx > cw - 35) continue; 
+                           
+                           g_ptp_dragging = true;
+                           g_ptp_drag_tkt = g_ppp_cache[c].ticket;
+                           g_ptp_drag_idx = pt;
+                           ChartSetInteger(0, CHART_MOUSE_SCROLL, false); 
+                           break;
+                        }
+                     }
+                  }
+               }
+               if(g_ptp_dragging) break;
+            }
+         } else {
+            int dummy_sub; datetime dummy_time; double new_price = 0;
+            if(ChartXYToTimePrice(0, mx, my, dummy_sub, dummy_time, new_price)) {
+               new_price = NormalizeDouble(new_price, _Digits);
+               int c_idx = GetCacheIdx(g_ptp_drag_tkt);
+               if(c_idx >= 0) {
+                  g_ppp_cache[c_idx].ptp_price[g_ptp_drag_idx] = new_price;
+                  string sfx = IntegerToString((int)g_ptp_drag_tkt);
+                  
+                  string ln_name = PREFIX+"PTP_LN_"+IntegerToString(g_ptp_drag_idx+1)+"_"+sfx;
+                  ObjectSetDouble(0, ln_name, OBJPROP_PRICE, new_price);
+                  
+                  double pct = (g_ptp_drag_idx==0)?Partial_TP1_Pct:(g_ptp_drag_idx==1)?Partial_TP2_Pct:(g_ptp_drag_idx==2)?Partial_TP3_Pct:(g_ptp_drag_idx==3)?Partial_TP4_Pct:25.0;
+                  UpdatePTP_Labels(g_ptp_drag_idx, sfx, new_price, pct, false);
+                  
+                  ChartRedraw(); 
+               }
+            }
+         }
+      } else {
+         if(g_ptp_dragging) {
+            g_ptp_dragging = false;
+            ChartSetInteger(0, CHART_MOUSE_SCROLL, true);
+            GlobalVariableSet(PREFIX+"PTP_TK_"+IntegerToString(g_ptp_drag_tkt)+"_"+IntegerToString(g_ptp_drag_idx), g_ppp_cache[GetCacheIdx(g_ptp_drag_tkt)].ptp_price[g_ptp_drag_idx]);
+            RefreshBoxes();
+            ChartRedraw();
+         }
+      }
+
+      int n = ArraySize(g_drawn_tickets);
+      if(n==0) return;
+      
+      static uint last_mouse_tick=0;
+      uint now = GetTickCount();
+      if(now-last_mouse_tick <= 250 && !g_ptp_dragging) return;
+      last_mouse_tick=now;
+      
+      bool local_redraw=false;
+      string fBold = FontFace + " Bold";
+      
+      for(int i=0; i<n; i++){
+         string ts = g_drawn_tickets[i];
+         string objs[2] = {PREFIX+"SUB_T"+ts, PREFIX+"SUB_S"+ts};
+         int widths[2] = {140, 200};
+         
+         for(int j=0; j<2; j++){
+            long ox = ObjectGetInteger(0,objs[j],OBJPROP_XDISTANCE);
+            if (ox == 0) continue; 
+            long oy = ObjectGetInteger(0,objs[j],OBJPROP_YDISTANCE);
+            
+            bool hover = (mx>=ox && mx<=ox+widths[j] && my>=oy && my<=oy+18);
+            string wantFont = hover ? fBold : FontFace;
+            
+            if(ObjectGetString(0,objs[j],OBJPROP_FONT) != wantFont){
+               ObjectSetString(0,objs[j],OBJPROP_FONT,wantFont);
+               local_redraw = true;
+            }
+         }
+      }
+      if(local_redraw) ChartRedraw();
+      return;
+   }
+
+   if(id==CHARTEVENT_CHART_CHANGE)
+   {
+      uint now=GetTickCount();
+      if(now-g_last_chart_change_tick < CHART_CHANGE_DEBOUNCE_MS) return;
+      g_last_chart_change_tick=now;
+      
+      int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+      double pMax=ChartGetDouble(0,CHART_PRICE_MAX);
+      double pMin=ChartGetDouble(0,CHART_PRICE_MIN);
+      
+      if(cw!=g_last_cw || MathAbs(pMax-g_last_pMax)>_Point || MathAbs(pMin-g_last_pMin)>_Point){
+         g_last_cw=cw; g_last_pMax=pMax; g_last_pMin=pMin;
+         g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw();
+      }
+      return;
+   }
+
+   if(id==CHARTEVENT_OBJECT_DRAG)
+   {
+      if(StringFind(sp,PREFIX+"LN_T")==0 || StringFind(sp,PREFIX+"LN_S")==0)
+      {
+         int prefLen = StringLen(PREFIX)+3;
+         string typeChar = StringSubstr(sp,prefLen,1);
+         ulong ticket = (ulong)StringToInteger(StringSubstr(sp,prefLen+1));
+         
+         if(PositionSelectByTicket(ticket))
+         {
+            string sym = PositionGetString(POSITION_SYMBOL);
+            int digits = (int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+            
+            double p0 = ObjectGetDouble(0,sp,OBJPROP_PRICE,0);
+            double p1 = ObjectGetDouble(0,sp,OBJPROP_PRICE,1);
+            
+            double newP = NormalizeDouble((p0!=PositionGetDouble(POSITION_TP) && p0!=PositionGetDouble(POSITION_SL)) ? p0 : p1, digits);
+            
+            double sl = PositionGetDouble(POSITION_SL);
+            double tp = PositionGetDouble(POSITION_TP);
+            
+            if(typeChar=="T") tp=newP;
+            if(typeChar=="S") sl=newP;
+            
+            if(sl>0) sl=NormalizeDouble(sl,digits);
+            if(tp>0) tp=NormalizeDouble(tp,digits);
+            
+            g_force_redraw_ticks=4;
+            
+            if(!trade.PositionModify(ticket,sl,tp)) {
+               Print("Drag modify failed! Code: ",trade.ResultRetcode()," | Local: ",GetLastError());
+            }
+            
+            ObjectSetInteger(0, sp, OBJPROP_SELECTED, false);
+            g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw();
+         }
+      }
+      return;
+   }
+
+   if(id==CHARTEVENT_OBJECT_CLICK)
+   {
+      if(StringFind(sp, PREFIX+"PTP_DEL_") == 0)
+      {
+         PlaySound("click.wav");
+         string rem = StringSubstr(sp, StringLen(PREFIX+"PTP_DEL_"));
+         int u_idx = StringFind(rem, "_");
+         if(u_idx > 0) {
+            int pt_idx = (int)StringToInteger(StringSubstr(rem, 0, u_idx)) - 1;
+            ulong tk = (ulong)StringToInteger(StringSubstr(rem, u_idx+1));
+            int c_idx = GetCacheIdx(tk);
+
+            if(c_idx >= 0 && pt_idx >= 0 && pt_idx < 4) {
+               g_ppp_cache[c_idx].ptp_active[pt_idx] = false;
+               g_ppp_cache[c_idx].ptp_hit[pt_idx] = false;
+               GlobalVariableDel(PREFIX+"PTP_TK_"+IntegerToString(tk)+"_"+IntegerToString(pt_idx)); 
+               
+               string sfx = IntegerToString((int)tk);
+               string sfx_idx = IntegerToString(pt_idx+1)+"_"+sfx;
+               
+               SafeDelete(PREFIX+"PTP_LN_"+sfx_idx);
+               SafeDelete(PREFIX+"PTP_LBL_"+sfx_idx);
+               SafeDelete(PREFIX+"PTP_VAL_"+sfx_idx);
+               SafeDelete(PREFIX+"PTP_DEL_"+sfx_idx);
+
+               g_needs_redraw = false; RefreshBoxes(); ChartRedraw();
+            }
+         }
+         return;
+      }
+
+      if(StringFind(sp, PREFIX+"RR_") == 0)
+      {
+         ObjectSetInteger(0,sp,OBJPROP_STATE,false); 
+         
+         string rem = StringSubstr(sp, StringLen(PREFIX)+3); 
+         int u_idx = StringFind(rem, "_");
+         if(u_idx < 0) { return; }
+         
+         int rr_idx = (int)StringToInteger(StringSubstr(rem, 0, u_idx));
+         ulong tk = (ulong)StringToInteger(StringSubstr(rem, u_idx+1));
+         
+         if(PositionSelectByTicket(tk)) {
+            double sl = PositionGetDouble(POSITION_SL);
+            double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+            long type = PositionGetInteger(POSITION_TYPE);
+            
+            if(sl == 0 || MathAbs(entry - sl) < _Point) {
+               Print("Cannot set RR Target: Please drag and set a Stop Loss first.");
+               PlaySound("timeout.wav");
+               g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw(); return;
+            }
+            
+            double risk = MathAbs(entry - sl);
+            double multiplier = (rr_idx==1) ? RR_Target_1 : (rr_idx==2) ? RR_Target_2 : (rr_idx==3) ? RR_Target_3 : RR_Target_Custom;
+            double target_dist = risk * multiplier;
+            
+            double new_tp = (type == POSITION_TYPE_BUY) ? (entry + target_dist) : (entry - target_dist);
+            int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+            new_tp = NormalizeDouble(new_tp, digits);
+            
+            if(!trade.PositionModify(tk, sl, new_tp)) {
+               Print("Broker rejected setting RR TP! Code: ", trade.ResultRetcode());
+               PlaySound("timeout.wav");
+            } else {
+               PlaySound("click.wav");
+            }
+         }
+         
+         g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw(); return;
+      }
+
+      if(StringFind(sp, PREFIX+"ADDPTP_")==0) 
+      {
+         ObjectSetInteger(0,sp,OBJPROP_STATE,false); PlaySound("click.wav");
+         ulong tk = (ulong)StringToInteger(StringSubstr(sp, StringLen(PREFIX)+7));
+         int c_idx = GetCacheIdx(tk);
+         
+         if(c_idx >= 0 && PositionSelectByTicket(tk)) {
+            for(int i=0; i<4; i++) {
+               if(!g_ppp_cache[c_idx].ptp_active[i]) {
+                  g_ppp_cache[c_idx].ptp_active[i] = true;
+                  g_ppp_cache[c_idx].ptp_hit[i] = false;
+                  
+                  double curPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                  double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+                  double tp = PositionGetDouble(POSITION_TP);
+                  double sl = PositionGetDouble(POSITION_SL);
+                  bool isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+                  
+                  double targetPrice = 0;
+                  double dist = 0;
+                  
+                  if(tp > 0 && MathAbs(tp - curPrice) > 100 * _Point) {
+                     dist = MathAbs(tp - curPrice) * 0.15; 
+                  } else if(sl > 0 && MathAbs(entry - sl) > 100 * _Point) {
+                     dist = MathAbs(entry - sl) * 0.5; 
+                  } else {
+                     dist = curPrice * 0.0015; 
+                  }
+                  
+                  double offset = dist * (i + 1);
+                  targetPrice = isBuy ? (curPrice + offset) : (curPrice - offset);
+                  
+                  g_ppp_cache[c_idx].ptp_price[i] = NormalizeDouble(targetPrice, _Digits);
+                  GlobalVariableSet(PREFIX+"PTP_TK_"+IntegerToString(tk)+"_"+IntegerToString(i), g_ppp_cache[c_idx].ptp_price[i]); 
+                  break;
+               }
+            }
+         }
+         g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw();
+         return;
+      }
+   
+      if(StringFind(sp,PREFIX+"BTN_")==0)
+      {
+         ObjectSetInteger(0,sp,OBJPROP_STATE,false);
+         PlaySound("click.wav");
+
+         int    actionOffset = StringLen(PREFIX)+4;
+         int    ticketOffset = actionOffset+2;
+         string actionStr    = StringSubstr(sp,actionOffset,1);
+         ulong  ticket       = (ulong)StringToInteger(StringSubstr(sp,ticketOffset));
+
+         g_force_redraw_ticks=4;
+
+         if(actionStr=="M"){
+            if(g_active_menu_ticket == ticket) {
+                g_active_menu_ticket = 0;
+                g_active_rr_ticket = 0; 
+                g_active_partial_ticket = 0;
+            } else {
+                g_active_menu_ticket = ticket;
+                g_active_rr_ticket = 0; 
+                g_active_partial_ticket = 0;
+            }
+         }
+         else if(actionStr=="R"){
+            if(g_active_rr_ticket == ticket) {
+                g_active_rr_ticket = 0;
+            } else {
+                g_active_rr_ticket = ticket;
+                g_active_partial_ticket = 0; 
+            }
+         }
+         else if(actionStr=="P"){
+            if(g_active_partial_ticket == ticket) {
+                g_active_partial_ticket = 0;
+            } else {
+                g_active_partial_ticket = ticket;
+                g_active_rr_ticket = 0; 
+            }
+         }
+         else if(actionStr=="B"){
+            if(PositionSelectByTicket(ticket)){
+               double entry  = PositionGetDouble(POSITION_PRICE_OPEN);
+               long   pType2 = PositionGetInteger(POSITION_TYPE);
+               string sym    = PositionGetString(POSITION_SYMBOL);
+               int    digits = (int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+               double ask    = SymbolInfoDouble(sym,SYMBOL_ASK);
+               double bid    = SymbolInfoDouble(sym,SYMBOL_BID);
+               double cur2   = (pType2==POSITION_TYPE_BUY) ? bid : ask;
+               double stp_lv = SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL)*SymbolInfoDouble(sym,SYMBOL_POINT);
+               double tp     = PositionGetDouble(POSITION_TP);
+               double sl     = PositionGetDouble(POSITION_SL);
+               double new_sl = NormalizeDouble(entry,digits);
+               
+               if(MathAbs(sl-new_sl) < SymbolInfoDouble(sym,SYMBOL_POINT)*0.5){
+                  PlaySound("timeout.wav"); Print("BE Ignored: SL already at Breakeven.");
+                  g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw(); return;
+               }
+               
+               bool far_enough = (pType2==POSITION_TYPE_BUY) ? (cur2-new_sl)>=stp_lv : (new_sl-cur2)>=stp_lv;
+               if(!far_enough){
+                  PlaySound("timeout.wav"); Print("BE Failed: Price too close to entry. Broker needs ",(int)(stp_lv/_Point)," pts distance.");
+                  g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw(); return;
+               }
+               
+               ResetLastError();
+               if(!trade.PositionModify(ticket,new_sl,tp)){
+                  PlaySound("timeout.wav"); Print("BE Rejected! Code: ",trade.ResultRetcode()," | Err: ",GetLastError());
+               } else { PlaySound("ok.wav"); }
+            }
+         }
+         else if(actionStr=="E" || actionStr=="C"){
+            if(!trade.PositionClose(ticket)) Print("Rejected closing! Code: ",trade.ResultRetcode()," | Local: ",GetLastError());
+            g_active_menu_ticket=0; g_active_rr_ticket=0; g_active_partial_ticket=0;
+         }
+         else if(actionStr=="T"||actionStr=="S"){
+            if(PositionSelectByTicket(ticket)){
+               string sym=PositionGetString(POSITION_SYMBOL);
+               int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+               double sl=PositionGetDouble(POSITION_SL);
+               double tp=PositionGetDouble(POSITION_TP);
+               
+               if(actionStr=="T") tp=0;
+               if(actionStr=="S") sl=0;
+               
+               if(sl>0) sl=NormalizeDouble(sl,digits);
+               if(tp>0) tp=NormalizeDouble(tp,digits);
+               
+               if(!trade.PositionModify(ticket,sl,tp)) Print("Rejected modify! Code: ",trade.ResultRetcode()," | Local: ",GetLastError());
+            }
+         }
+         
+         g_needs_redraw=false; RefreshBoxes(); if(g_needs_redraw) ChartRedraw(); return;
+      }
+   }
+}
+//+------------------------------------------------------------------+
